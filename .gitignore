@@ -1,7 +1,6 @@
 # ── AI / agent instructions ────────────────────────────────
 CLAUDE.md
 AGENT.md
-docs/
 
 # ── Hidden files ───────────────────────────────────────────
 # Catch-all for dotfiles/dirs — covers .env, .venv, .cache,
@@ -13,8 +12,6 @@ docs/
 # ── Notebooks & scratch ────────────────────────────────────
 *.ipynb
 *.bak
-run_*
-test*
 temp*
 
 # ── Archived material ──────────────────────────────────────
@@ -25,6 +22,7 @@ Models/
 Database/
 ProjDB/
 ProjDB
+exploration/
 
 # ── Logs / cores / process output ──────────────────────────
 log/
@@ -48,12 +46,10 @@ fitout.dat
 *.npz
 *.npy
 *.csv
-*.txt
 *.pt
 *.pth
 
 # ── Config & secrets ───────────────────────────────────────
-*.yml
 *.token
 
 # ── Images ─────────────────────────────────────────────────
