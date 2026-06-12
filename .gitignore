@@ -1,0 +1,118 @@
+# ── AI / agent instructions ────────────────────────────────
+CLAUDE.md
+AGENT.md
+docs/
+
+# ── Hidden files ───────────────────────────────────────────
+# Catch-all for dotfiles/dirs — covers .env, .venv, .cache,
+# .coverage, .pytest_cache/, .mypy_cache/, .tox/, .nox/,
+# .eggs/, .hypothesis/, .ipynb_checkpoints, .ropeproject, etc.
+.*
+!.gitignore
+
+# ── Notebooks & scratch ────────────────────────────────────
+*.ipynb
+*.bak
+run_*
+test*
+temp*
+
+# ── Archived material ──────────────────────────────────────
+Archived/
+
+# ── Project data & model directories ───────────────────────
+Models/
+Database/
+ProjDB/
+
+# ── Logs / cores / process output ──────────────────────────
+log/
+logs/
+*.log
+*.err
+*.out
+core.*
+
+# ── EFIT / Fortran scratch ─────────────────────────────────
+fort.[0-9]*
+fitout.dat
+[agmk][0-9][0-9]*.[0-9]*
+*.new
+*.b
+
+# ── Data & model artefacts ─────────────────────────────────
+*.h5
+*.npz
+*.npy
+*.csv
+*.txt
+*.pt
+*.pth
+
+# ── Config & secrets ───────────────────────────────────────
+*.yml
+*.token
+
+# ── Images ─────────────────────────────────────────────────
+*.jpg
+*.png
+*.svg
+*.eps
+
+# ── Python: bytecode & C extensions ────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ── Python: distribution / packaging ───────────────────────
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+*.manifest
+*.spec
+
+# ── Python: test & coverage ────────────────────────────────
+htmlcov/
+cover/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# ── Python: frameworks (Django / Flask / Scrapy) ───────────
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+instance/
+
+# ── Python: tooling ────────────────────────────────────────
+profile_default/
+ipython_config.py
+__pypackages__/
+celerybeat-schedule
+celerybeat.pid
+*.sage.py
+*.mo
+*.pot
+/site
+target/
+dmypy.json
+cython_debug/
+
+# ── Python: environments ───────────────────────────────────
+env/
+venv/
+ENV/
