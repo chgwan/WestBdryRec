@@ -30,6 +30,7 @@ ProjDB
 log/
 logs/
 logs
+figs
 *.log
 *.err
 *.out
