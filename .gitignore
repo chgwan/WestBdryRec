@@ -28,6 +28,7 @@ ProjDB/
 # ── Logs / cores / process output ──────────────────────────
 log/
 logs/
+logs
 *.log
 *.err
 *.out
