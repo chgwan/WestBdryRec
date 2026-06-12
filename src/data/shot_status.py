@@ -35,7 +35,7 @@ which needs the conda env's libstdc++ on the linker path. Run under an activated
 `torch` env.
 
 Importable as a package module (relative imports); drive it via the root runner:
-    python run_data_pre.py            # drives this + other prep steps
+    python scripts/run_data_pre.py            # drives this + other prep steps
 """
 import collections
 import csv
@@ -47,8 +47,9 @@ import numpy as np
 
 from private_modules.utils.com_tools import calc_sample_frequency
 
-from .proj_config import get_proj_config
-from .utils import data_paths, pmap
+from ..proj_config import get_proj_config
+from ..utils import pmap
+from .paths import data_paths
 
 # Single source of truth: src/proj_config.py (ProjConfig fields/ClassVars).
 _cfg = get_proj_config()
