@@ -48,23 +48,22 @@ import numpy as np
 from private_modules.utils.com_tools import calc_sample_frequency
 
 from .proj_config import get_proj_config
-from .utils import pmap
+from .utils import data_paths, pmap
 
-BND = "targets/GMAG_BND"
-TRUNC_MIN = 1000       # DCS records shorter than this count as "truncated" (aborted)
-DOWNSAMPLE_TOL = 0.9   # fraction of nominal below which a signal counts as downsampled
+# Single source of truth: src/proj_config.py (ProjConfig fields/ClassVars).
+_cfg = get_proj_config()
+BND = _cfg.gmag_bnd_key
+TRUNC_MIN = _cfg.dcs_trunc_min          # DCS records shorter than this = "truncated"
+DOWNSAMPLE_TOL = _cfg.downsample_tol    # < this * nominal => "downsampled"
 
 
 def default_paths():
     """Derive source/output dirs from configs/base.yml via proj_config."""
-    cfg = get_proj_config()
-    root = pathlib.Path(cfg.DATABASE_dir)
-    stats = pathlib.Path(cfg.proj_db_dir) / "Stats"
+    d = data_paths()
     return {
-        "bnd_dir": root / "DataOrg",
-        "dcs_dir": root / "DCSH5",
-        "status_csv": stats / "shot_status.csv",
-        "freq_csv": stats / "shot_freq_stats.csv",
+        **d,
+        "status_csv": d["stats_dir"] / "shot_status.csv",
+        "freq_csv": d["stats_dir"] / "shot_freq_stats.csv",
     }
 
 
