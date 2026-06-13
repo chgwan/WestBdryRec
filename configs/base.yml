@@ -1,0 +1,33 @@
+nodes: 
+  # PCS:
+  scan_nodes: ["IA_scope", "IBb_scope", "IDb_scope", "IEb_scope", "IFb_scope", 
+    "IFh_scope", "IEh_scope", "IDh_scope", "IBh_scope", "IXb_scope", 
+    "IXh_scope", "Ip_scope", "Vloop_scope", "R_scope", "Z_scope", "dXlow_scope", 
+    "EROG_scope", "PowLH1_scope", "PowLH2_scope", "PhaLH1_scope", "PhaLH2_scope", 
+    "PowIC1_scope", "PowIC2_scope", "PowIC3_scope", "PhaIC1_scope", "PhaIC2_scope", 
+    "PhaIC3_scope", "REF1_scope", "REF2_scope", "REF3_scope", ]
+  
+  LHW: ["PowLH1_scope", "PowLH2_scope", "PhaLH1_scope", "PhaLH2_scope",]
+  ICRH_phase: ["PhaIC1_scope", "PhaIC2_scope", "PhaIC3_scope"]
+  # There are so many nan in PhaIC[1-3]_scope, so we change to only Power.
+  ICRH: ["PowIC1_scope", "PowIC2_scope", "PowIC3_scope"]
+  PF: ["IBb_scope", "IDb_scope", "IEb_scope", "IFb_scope", 
+    "IFh_scope", "IEh_scope", "IDh_scope", "IBh_scope", "IXb_scope", 
+    "IXh_scope",]
+  CS: ["IA_scope"]
+  Vloop: ["Vloop_scope"]
+  Ne: ["REF1_scope"]
+  Ip: ["Ip_scope"]
+  SMAG_IP: ["SMAG_IP"]
+
+data:
+  database_dir: $DATABASE_PATH/DataBase/WEST/Boundary
+  input_list: [
+    "LHW_real",
+    "ICRH_phase_real",
+    "ICRH_real",
+    "Ip_ref",
+    "Ne_real",
+    "PF_real",
+    "SMAG_IP_real",
+    ]

@@ -19,6 +19,66 @@ class ProjConfig(BaseSettings):
     # --- tunable thresholds (overridable via PROJ_* env vars) ---
     dcs_trunc_min: int = 1000       # DCS records shorter than this = "truncated"
     downsample_tol: float = 0.9     # < this * nominal => "downsampled"
+    flat_top_min_s: float = 3.0     # keep shots whose total Ip flat-top exceeds this
+
+    # --- WEST boundary data subdirs (derived from DATABASE_dir) ---
+    @property
+    def dcs_org_dir(self) -> pathlib.Path:
+        return self.DATABASE_dir / "DCSOrg"
+
+    @property
+    def dcs_h5_dir(self) -> pathlib.Path:
+        return self.DATABASE_dir / "DCSH5"
+
+    @property
+    def data_org_dir(self) -> pathlib.Path:
+        return self.DATABASE_dir / "DataOrg"
+
+    @property
+    def merged_dir(self) -> pathlib.Path:
+        return self.DATABASE_dir / "Merged"
+
+    # --- data output layout (CSV tables under ProjDB/Stats) ---
+    @property
+    def stats_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "Stats"
+
+    @property
+    def shot_status_csv(self) -> pathlib.Path:
+        return self.stats_dir / "shot_status.csv"
+
+    @property
+    def shot_freq_stats_csv(self) -> pathlib.Path:
+        return self.stats_dir / "shot_freq_stats.csv"
+
+    @property
+    def signal_freq_summary_csv(self) -> pathlib.Path:
+        return self.stats_dir / "signal_freq_summary.csv"
+
+    # --- figure output layout (generated PNGs under <project root>/figs) ---
+    @property
+    def figs_dir(self) -> pathlib.Path:
+        return self.base_dir / "figs"
+
+    @property
+    def lcfs_fig_dir(self) -> pathlib.Path:
+        return self.figs_dir / "LCFS"
+
+    @property
+    def sig_freqs_fig_dir(self) -> pathlib.Path:
+        return self.figs_dir / "SigFreqs"
+
+    @property
+    def dcs_actual_vs_ref_dir(self) -> pathlib.Path:
+        return self.figs_dir / "dcs_actual_vs_ref"
+
+    def data_paths(self) -> Dict[str, pathlib.Path]:
+        """Common database paths used across the data-prep pipeline."""
+        return {
+            "bnd_dir": self.data_org_dir,
+            "dcs_dir": self.dcs_h5_dir,
+            "stats_dir": self.stats_dir,
+        }
 
     model_config = SettingsConfigDict(
         env_file=('.env', '.env.local'),
