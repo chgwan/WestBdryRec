@@ -13,6 +13,7 @@ AGENT.md
 *.ipynb
 *.bak
 temp*
+tests/
 
 # ── Archived material ──────────────────────────────────────
 Archived/
