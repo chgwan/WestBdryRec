@@ -9,7 +9,7 @@ by the *plateau* value (median over that window), not the whole-record median.
 Pipeline: ref-flat segments -> refine each edge with the actual-Ip q20 threshold
 (EAST ``get_flat_top_times``) -> total flat-top duration. Writes ``flat_top.csv``.
 
-Importable as a package module; driven from ``scripts/run_flat_top.py``.
+Importable as a package module; driven from ``scripts/run_data_pre.py``.
 """
 import collections
 import csv
