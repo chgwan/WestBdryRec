@@ -49,7 +49,6 @@ from private_modules.utils.com_tools import calc_sample_frequency
 
 from ..proj_config import get_proj_config
 from ..utils import pmap
-from .paths import data_paths
 
 # Single source of truth: src/proj_config.py (ProjConfig fields/ClassVars).
 _cfg = get_proj_config()
@@ -60,7 +59,7 @@ DOWNSAMPLE_TOL = _cfg.downsample_tol    # < this * nominal => "downsampled"
 
 def default_paths():
     """Derive source/output dirs from configs/base.yml via proj_config."""
-    d = data_paths()
+    d = _cfg.data_paths()
     return {
         **d,
         "status_csv": d["stats_dir"] / "shot_status.csv",
