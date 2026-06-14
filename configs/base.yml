@@ -18,7 +18,7 @@ nodes:
   Vloop: ["Vloop_scope"]
   Ne: ["REF1_scope"]
   Ip: ["Ip_scope"]
-  SMAG_IP: ["SMAG_IP"]
+  # SMAG_IP: ["SMAG_IP"]
 
 data:
   database_dir: $DATABASE_PATH/DataBase/WEST/Boundary
@@ -29,5 +29,5 @@ data:
     "Ip_ref",
     "Ne_real",
     "PF_real",
-    "SMAG_IP_real",
+    # "SMAG_IP_real",
     ]

@@ -1,0 +1,46 @@
+
+# Test on one mid-campaign shot from C9 
+shots: [57821]
+# shot_range:
+#   from: 59700
+#   to: 59705
+
+
+output_dir: NTU/plasma_boundary
+expected_sampling_hz: 500
+
+
+# Target: 32 (R, Z) boundary points at 500 Hz
+target:
+ name: GMAG_BND
+ unit: m
+ shape: [2, 32]
+
+
+# Inputs: every other signal from the WEST catalog
+# shape = non-time axes; [] means 1-D; null means unknown/variable.
+inputs:
+ - {name: SMAG_IP,       unit: kA,    shape: []}       # plasma current
+ - {name: GMAG_IFREEB,   unit: A,     shape: [8]}      # freebie coil currents (Ip, Ustab, Baffle, Ucase, Lcase, ...)
+ - {name: GMAG_IDCOEF,   unit: "-",   shape: [28]}     # freebie identified coefficients
+ - {name: SMAG_CONFIG,   unit: "-",   shape: []}       # 0 limiter / 1 LSN / 2 USN / 3 DN
+ - {name: GMAG_EXTREM,   unit: m,     shape: [8]}      # LCFS extrema OUT/UP/IN/LOW (R, Z)
+ - {name: GMAG_POSX,     unit: m,     shape: [4]}      # X-point coords
+ - {name: GMAG_STRIKE,   unit: m,     shape: [8]}      # strike-point coords upper/lower
+ - {name: GMAG_CONTACT,  unit: m,     shape: [2]}      # limiter contact point
+ - {name: GMAG_DSEP,     unit: "-",   shape: [2]}      # separatrix flux diff + equatorial distance
+ - {name: GMAG_GEOM,     unit: SI,    shape: [16]}     # plasma geometry (Rgeom, Zgeom, a, b, k, dup, dlow, ...)
+ - {name: GMAG_BARY,     unit: m,     shape: [2]}      # plasma current gravity center (RT network)
+ - {name: GMAG_BARYTH,   unit: m,     shape: [4]}      # gravity center, harmonic toroidal pole (VACTH)
+ - {name: GMAG_BARYFB,   unit: m,     shape: [6]}      # gravity center (FREEBIE)
+ - {name: GMAG_B_BND,    unit: T,     shape: [2, 32]}  # Br, Bz on LCFS
+ - {name: GMAG_BELI,     unit: "-",   shape: [6]}      # diamagnetic params (bdia, bMHD, btor, bN, lik, lidia)
+ - {name: GMAG_SHAF,     unit: "-",   shape: [8]}      # Shafranov params (Raxe, Beli, S1, S2, S3, Do, ak, aS); channel 1 = beta+li/2 (divide by 1000)
+ - {name: GMAG_BILAN,    unit: SI,    shape: [12]}     # powers + energies (PW, PLH, PIC, PEC, PTOT, Prad, Wdia, tdia, Wmag, WMHD, PTOT_smoothed)
+ - {name: GMAG_FV,       unit: Wb,    shape: [3]}      # flux at plasma boundary + upper/lower X-point
+ - {name: GMAG_Q,        unit: "-",   shape: [2]}      # qa (limiter phase), q95
+ - {name: GMAG_IPGUESS,  unit: MA,    shape: [4]}      # Ip first-guess estimators
+ - {name: GMAG_TEST,     unit: "-",   shape: [16]}     # test signal
+ - {name: GPOLO_IMES,    unit: A,     shape: null}     # poloidal coil current
+ - {name: GDIV1_IMES,    unit: A,     shape: null}     # divertor 1 (upper) coil current
+ - {name: GDIV2_IMES,    unit: A,     shape: null}     # divertor 2 (lower) coil current
