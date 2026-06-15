@@ -38,10 +38,23 @@ class ProjConfig(BaseSettings):
     def merged_dir(self) -> pathlib.Path:
         return self.DATABASE_dir / "Merged"
 
+    @property
+    def npz_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "Npz"
+
     # --- data output layout (CSV tables under ProjDB/Stats) ---
     @property
     def stats_dir(self) -> pathlib.Path:
         return self.proj_db_dir / "Stats"
+
+    # --- model output layout (training runs / hyperparameter tuning under ProjDB) ---
+    @property
+    def trains_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "trains"
+
+    @property
+    def tunes_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "tunes"
 
     @property
     def shot_status_csv(self) -> pathlib.Path:
