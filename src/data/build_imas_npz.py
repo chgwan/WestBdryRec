@@ -8,11 +8,12 @@ and writes ``ProjDB/Npz/imas/<shot>.npz`` with:
   time (nt) float32
   valid (nt) bool
 
-``valid`` requires finite Y and a sustained flat-top window (from ``ip``); if
-flat-top detection fails the finite-Y rows are kept as a fallback. Finiteness
-over X is deliberately NOT enforced here -- the sweep's ``pool()`` checks
-finiteness over the *selected* columns per sweep point, which is the correct
-granularity (a shot missing ``lh_power`` still contributes to a T2-only sweep).
+``valid`` requires finite Y and a sustained flat-top window (from ``ip``); a
+shot with no detectable flat-top is filtered out (build_one returns ok=False).
+Finiteness over X is deliberately NOT enforced here -- the sweep's ``pool()``
+checks finiteness over the *selected* columns per sweep point, which is the
+correct granularity (a shot missing ``lh_power`` still contributes to a T2-only
+sweep).
 The target ``lcfs_rho`` is the already-precomputed r(theta)@32 profile -- it is
 NOT reprojected here.
 
@@ -73,11 +74,13 @@ def _group_names(spec):
 
 def _group_block(hf, spec, nt):
     """``(nt, n_chan)`` block for one group, aligned to the canonical channel
-    order. Absent/Empty/misaligned channels become NaN columns (NOT dropped) so
-    every shot's ``X`` has the same columns in the same order."""
+    order. Absent/Empty/misaligned channels become fill columns (NOT dropped)
+    so every shot's ``X`` has the same columns in the same order. Fill is 0.0
+    when ``spec["zerofill"]`` is set (e.g. IC heating: absent -> 0 W), else NaN."""
     names = _group_names(spec)
     cols = [_read_ds(hf, nm, nt) if nm in hf else None for nm in names]
-    cols = [np.full((nt, 1), np.nan, np.float32) if c is None else c for c in cols]
+    fill = 0.0 if spec.get("zerofill") else np.nan
+    cols = [np.full((nt, 1), fill, np.float32) if c is None else c for c in cols]
     return np.concatenate(cols, axis=1)
 
 
@@ -127,20 +130,22 @@ def build_one(shot, imas_dir, npz_dir, cfg):
                 block = _group_block(hf, cfg["tiers"][g["tier"]][g["group"]], nt)
                 X[:, g["cols"][0]:g["cols"][1]] = block.astype(np.float32)
 
-            # --- validity: finite Y; AND flat-top window only if detection succeeds.
+            # --- validity: finite Y AND a sustained flat-top window (from ip).
             # NOTE: finiteness over X is NOT enforced here -- the sweep's pool()
             # checks finiteness over the *selected* columns per sweep point, which
             # is the correct granularity (a shot missing lh_power should still
-            # contribute to a T2-only sweep). If flat-top detection returns None,
-            # keep finite-Y rows as a fallback so the shot isn't dropped outright. ---
+            # contribute to a T2-only sweep). A shot with no detectable flat-top
+            # (win is None) or no ip is filtered out entirely (ok=False). ---
             valid = np.isfinite(Y).all(axis=1)
             ip = _read_ds(hf, "ip", nt)
-            if ip is not None:
-                win = flat_top_window(t, ip[:, 0])
-                if win is not None:
-                    m = np.zeros(nt, bool)
-                    m[win[0]:win[1] + 1] = True
-                    valid &= m
+            if ip is None:
+                return shot, False, "no ip for flat-top gate"
+            win = flat_top_window(t, ip[:, 0])
+            if win is None:
+                return shot, False, "no sustained flat-top"
+            m = np.zeros(nt, bool)
+            m[win[0]:win[1] + 1] = True
+            valid &= m
 
         if not valid.any():
             return shot, False, "no valid slices"

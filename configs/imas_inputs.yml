@@ -23,6 +23,7 @@ tiers:
                 pf_Eb, pf_Eh, pf_Fb, pf_Fh]
     tf:       {dataset: b0}              # vacuum toroidal field (NOT tf_btor -- anomaly)
     lh_power: {dataset: lh_power_launched_total}
+    ic_power: {dataset: ic_power_launched_total, zerofill: true}   # absent IC -> 0 W (not NaN)
   T1: {}                                 # magnetics not fetched -- tier empty/dropped
   T2:                                    # equilibrium globals (circular)
     globals:
