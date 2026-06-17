@@ -68,7 +68,7 @@ class SeqDataset(Dataset):
         import h5py
         self.shots = []
         self.mean = np.asarray(mean, float)
-        self.std = np.asarray(std, float)
+        self.std = np.maximum(np.asarray(std, float), 1e-6)
         for s in shots:
             f = pathlib.Path(h5_dir) / f"{int(s)}.h5"
             if not f.exists():

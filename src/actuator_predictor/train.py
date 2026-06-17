@@ -108,7 +108,7 @@ def predict_dump_seq(model, h5_dir, npz_dir, shots, raw_names, mean, std, out_pa
     """Run a sequence model over whole-shot actuator series and dump predictions."""
     import h5py
     dev = _device(); model.eval(); model.to(dev)
-    mean = np.asarray(mean, float); std = np.asarray(std, float)
+    mean = np.asarray(mean, float); std = np.maximum(np.asarray(std, float), 1e-6)
     preds = {}
     for s in shots:
         f = pathlib.Path(h5_dir) / f"{int(s)}.h5"

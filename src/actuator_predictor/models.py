@@ -19,7 +19,7 @@ class ResBlock(nn.Module):
         h = self.norm(x)
         h = torch.relu(self.lin1(h))
         h = self.drop(h)
-        return x + self.lin2(self.drop(h))
+        return x + self.lin2(h)
 
 
 class ResMLP(nn.Module):
