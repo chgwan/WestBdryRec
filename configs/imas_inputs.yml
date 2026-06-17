@@ -1,0 +1,35 @@
+# configs/imas_inputs.yml
+# Maps the local IMAS h5 datasets (all on `time` == absolute IMAS seconds) to
+# (tier, group). Drives build_imas_npz (assemble X + label tiers) AND imas_sweep
+# (select columns by tier). A dataset absent/Empty in the h5 -> its channels are
+# dropped at build time; a whole group empty -> that group is dropped.
+#
+# Circularity: T0 non-circular (strict actuators); T2 circular (equilibrium
+# globals, same IDS as the LCFS target). T1 (magnetics) + IC heating were not
+# fetched -> deferred. T3 (boundary geometry) collapses to the target itself.
+n_angles: 32
+
+target:
+  rho: lcfs_rho          # (nt, 32) -- precomputed boundary radius profile (the Y)
+  theta: lcfs_theta      # (32,)
+
+tiers:
+  T0:                                    # strict controllable actuators (non-circular)
+    pf_currents:
+      dataset: [pf_A, pf_Bb, pf_Bh, pf_Db, pf_Dh, pf_Divertor_bottom1_HFS,
+                pf_Divertor_bottom1_LFS, pf_Divertor_bottom2_HFS,
+                pf_Divertor_bottom2_LFS, pf_Divertor_top1_HFS,
+                pf_Divertor_top1_LFS, pf_Divertor_top2_HFS, pf_Divertor_top2_LFS,
+                pf_Eb, pf_Eh, pf_Fb, pf_Fh]
+    tf:       {dataset: b0}              # vacuum toroidal field (NOT tf_btor -- anomaly)
+    lh_power: {dataset: lh_power_launched_total}
+  T1: {}                                 # magnetics not fetched -- tier empty/dropped
+  T2:                                    # equilibrium globals (circular)
+    globals:
+      dataset: [ip, beta_normal, beta_pol, beta_tor, energy_mhd, li_3, q_95,
+                q_axis, q_min_value, psi_axis, psi_boundary, r0, v_loop,
+                power_ohm, power_loss, power_radiated, tau_energy_98,
+                volume, area, elongation, triangularity, triangularity_lower,
+                triangularity_upper, minor_radius]
+    axes:
+      dataset: [magnetic_axis_r, magnetic_axis_z, geom_axis_r, geom_axis_z]
