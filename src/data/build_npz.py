@@ -31,6 +31,44 @@ N_POINTS = 32          # native LCFS vertices per slice
 ORIGIN = (2.5, 0.0)    # fixed polar origin (m): WEST nominal major radius / midplane
 N_ANGLES = 32          # fixed uniform angle grid size
 
+# Equilibrium scalar LABELS for the guided model: (name, h5 node, channel, scale).
+# Used ONLY as training targets -- never an inference input. Channels/scale per
+# Task A0 verification: GMAG_SHAF[1]=beta+li/2 (/1000), GMAG_BELI[5]=lidia (/1000).
+# (q95/GMAG_Q is all-zero in the dataset -> not used.)
+SCALAR_NODES = [
+    ("beli", "GMAG_SHAF", 1, 1e-3),
+    ("li",   "GMAG_BELI", 5, 1e-3),
+]
+N_SCALARS = len(SCALAR_NODES)
+
+
+def _read_scalar(hf, node, ch, i0, i1):
+    """Channel ``ch`` of a multi-channel GMAG signal, windowed ``[i0:i1+1]``.
+
+    Reconstruction signals are stored ``(n_channels, nt)`` (like ``targets/GMAG_BND``),
+    resolved under ``inputs/<node>``. Returns a ``(nt,)`` float array or ``None``.
+    """
+    path = f"inputs/{node}"
+    if path not in hf:
+        return None
+    arr = np.asarray(hf[path], float)
+    if arr.ndim != 2 or arr.shape[0] <= ch:
+        return None
+    return arr[ch, i0:i1 + 1]
+
+
+def read_scalars(hf, i0, i1, nt):
+    """Equilibrium scalar labels ``S`` of shape ``(nt, N_SCALARS)`` over the window.
+
+    Absent/short channels become an all-NaN column (folded into validity later).
+    """
+    S = np.full((nt, N_SCALARS), np.nan, np.float32)
+    for k, (_name, node, ch, scale) in enumerate(SCALAR_NODES):
+        col = _read_scalar(hf, node, ch, i0, i1)
+        if col is not None and col.shape == (nt,):
+            S[:, k] = (np.asarray(col, float) * scale).astype(np.float32)
+    return S
+
 
 def periodic_interp(query, xp, fp):
     """Linear interp of a 2*pi-periodic function sampled at sorted ``xp`` in [0, 2pi).
@@ -155,8 +193,18 @@ def reduce_stats(per_shot, eps):
     y_mean = y_sum / n
     x_std = np.sqrt(np.maximum(x_sumsq / n - x_mean ** 2, 0.0))
     y_std = np.sqrt(np.maximum(y_sumsq / n - y_mean ** 2, 0.0))
-    return {"X_mean": x_mean, "X_std": np.maximum(x_std, eps),
-            "Y_mean": y_mean, "Y_std": np.maximum(y_std, eps), "n_valid": n}
+    out = {"X_mean": x_mean, "X_std": np.maximum(x_std, eps),
+           "Y_mean": y_mean, "Y_std": np.maximum(y_std, eps), "n_valid": n}
+    if per_shot and "S_sum" in per_shot[0]:
+        s_sum = np.sum([np.asarray(d["S_sum"], float) for d in per_shot], axis=0)
+        s_sumsq = np.sum([np.asarray(d["S_sumsq"], float) for d in per_shot], axis=0)
+        n_s = float(sum(int(d["n_scalar_valid"]) for d in per_shot))
+        s_mean = s_sum / max(n_s, 1.0)
+        s_std = np.sqrt(np.maximum(s_sumsq / max(n_s, 1.0) - s_mean ** 2, 0.0))
+        out["S_mean"] = s_mean
+        out["S_std"] = np.maximum(s_std, eps)
+        out["n_scalar_valid"] = n_s
+    return out
 
 
 def theta_grid(n_angles=N_ANGLES):
@@ -199,11 +247,15 @@ def _build_one(args):
             if not valid.any():
                 return shot, False, "zero valid slices"
 
+            S = read_scalars(hf, i0, i1, nt)                 # (nt, N_SCALARS)
+            s_valid = valid & np.isfinite(S).all(axis=1)
+
             # streaming stats over valid rows (float64 for stable accumulation)
             Xv = X[valid].astype(np.float64)
             Yv = Y[valid].astype(np.float64)
+            Sv = S[s_valid].astype(np.float64)
 
-            np.savez(out, X=X.astype(np.float32), Y=Y, bnd_RZ=bnd_RZ,
+            np.savez(out, X=X.astype(np.float32), Y=Y, S=S, bnd_RZ=bnd_RZ,
                      time=time.astype(np.float32), valid=valid)
         return shot, True, {
             "shot": int(shot), "n_slices": int(nt),
@@ -211,6 +263,8 @@ def _build_one(args):
             "X_sum": Xv.sum(0), "X_sumsq": (Xv * Xv).sum(0),
             "Y_sum": Yv.sum(0), "Y_sumsq": (Yv * Yv).sum(0),
             "n_valid": int(valid.sum()),
+            "S_sum": Sv.sum(0), "S_sumsq": (Sv * Sv).sum(0),
+            "n_scalar_valid": int(s_valid.sum()),
         }
     except Exception as exc:  # noqa: BLE001
         if out.exists():
@@ -265,7 +319,7 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
                    "n_angles": n_angles, "unit": "m"},
         "inputs": layout,
         "n_features": F,
-        "arrays": {"X": ["nt", F], "Y": ["nt", n_angles],
+        "arrays": {"X": ["nt", F], "Y": ["nt", n_angles], "S": ["nt", N_SCALARS],
                    "bnd_RZ": ["nt", 32, 2], "time": ["nt"], "valid": ["nt"]},
         "norm": {"X_mean": np.asarray(norm["X_mean"]).tolist(),
                  "X_std": np.asarray(norm["X_std"]).tolist(),
@@ -276,6 +330,12 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
         "n_shots": len(ok),
         "total_slices": int(sum(d["n_slices"] for d in ok)),
     }
+    if "S_mean" in norm:
+        meta["norm"]["S_mean"] = np.asarray(norm["S_mean"]).tolist()
+        meta["norm"]["S_std"] = np.asarray(norm["S_std"]).tolist()
+        meta["norm"]["n_scalar_valid"] = int(norm["n_scalar_valid"])
+        meta["scalars"] = [{"name": n, "node": node, "channel": ch, "scale": sc}
+                           for (n, node, ch, sc) in SCALAR_NODES]
     with open(npz_dir / "meta.json", "w") as fh:
         json.dump(meta, fh, indent=2)
 
