@@ -42,6 +42,20 @@ class ProjConfig(BaseSettings):
     def npz_dir(self) -> pathlib.Path:
         return self.proj_db_dir / "Npz"
 
+    # --- IMAS-native LCFS sweep layout ---
+    @property
+    def imas_h5_dir(self) -> pathlib.Path:
+        # IMAS/<shot>.h5 sits next to Boundary/: <DATABASE_PATH>/DataBase/WEST/IMAS
+        return self.DATABASE_dir.parent / "IMAS"
+
+    @property
+    def imas_npz_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "Npz" / "imas"
+
+    @property
+    def imas_sweep_stats_dir(self) -> pathlib.Path:
+        return self.stats_dir / "imas_input_sweep"
+
     # --- data output layout (CSV tables under ProjDB/Stats) ---
     @property
     def stats_dir(self) -> pathlib.Path:
