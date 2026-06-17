@@ -8,15 +8,21 @@ and writes ``ProjDB/Npz/imas/<shot>.npz`` with:
   time (nt) float32
   valid (nt) bool
 
-``valid`` requires finite Y, finite X, and a sustained flat-top (from ``ip``).
+``valid`` requires finite Y and a sustained flat-top window (from ``ip``); if
+flat-top detection fails the finite-Y rows are kept as a fallback. Finiteness
+over X is deliberately NOT enforced here -- the sweep's ``pool()`` checks
+finiteness over the *selected* columns per sweep point, which is the correct
+granularity (a shot missing ``lh_power`` still contributes to a T2-only sweep).
 The target ``lcfs_rho`` is the already-precomputed r(theta)@32 profile -- it is
 NOT reprojected here.
 
-Real-schema robustness:
-  * ``h5py.Empty`` datasets (e.g. ``power_additional``) and absent datasets
-    (e.g. ``lh_power_launched_total`` on some shots) are dropped per-channel via
-    ``_read_ds`` returning ``None``; a whole group empty -> that group is dropped.
-  * Non-finite rows (e.g. ``tau_energy_98`` NaNs) are excluded from ``valid``.
+Canonical column layout:
+  Every shot's ``X`` has the SAME columns in the SAME order, driven by the
+  config (``cfg["tiers"]`` dict order -> groups dict order -> each group's named
+  datasets). Absent/Empty/misaligned channels become **NaN columns** (NOT
+  dropped), so ``d["X"][:, cols]`` is valid for every shot regardless of which
+  optional channels a shot happens to carry. The canonical layout is recorded
+  once in ``meta.json["inputs"]``.
 
 Importable as a package module.
 """
@@ -59,14 +65,39 @@ def _read_ds(hf, name, nt):
     return a
 
 
-def _group_block(hf, spec, nt):
-    """``(nt, k)`` block for one group; channels with absent/Empty datasets dropped.
+def _group_names(spec):
+    """Canonical channel list for a group (``dataset`` is a name or list of names)."""
+    d = spec["dataset"]
+    return list(d) if isinstance(d, list) else [d]
 
-    Returns ``None`` only if every channel is absent (the whole group is dropped)."""
-    names = spec["dataset"] if isinstance(spec["dataset"], list) else [spec["dataset"]]
-    blocks = [_read_ds(hf, nm, nt) for nm in names]
-    blocks = [b for b in blocks if b is not None]
-    return np.concatenate(blocks, axis=1) if blocks else None
+
+def _group_block(hf, spec, nt):
+    """``(nt, n_chan)`` block for one group, aligned to the canonical channel
+    order. Absent/Empty/misaligned channels become NaN columns (NOT dropped) so
+    every shot's ``X`` has the same columns in the same order."""
+    names = _group_names(spec)
+    cols = [_read_ds(hf, nm, nt) if nm in hf else None for nm in names]
+    cols = [np.full((nt, 1), np.nan, np.float32) if c is None else c for c in cols]
+    return np.concatenate(cols, axis=1)
+
+
+def canonical_layout(cfg):
+    """Canonical column layout driven by ``cfg["tiers"]`` (dict order: tiers,
+    then groups, then each group's named datasets). Same for every shot.
+
+    Returns a list of ``{tier, group, names, cols, n_chan}`` with contiguous
+    ``cols`` ranges; absent/Empty channels become NaN columns at build time."""
+    layout, start = [], 0
+    for tier, groups in cfg["tiers"].items():
+        if not groups:
+            continue
+        for gname, spec in groups.items():
+            names = _group_names(spec)
+            k = len(names)
+            layout.append({"tier": tier, "group": gname, "names": list(names),
+                           "cols": [start, start + k], "n_chan": k})
+            start += k
+    return layout, start
 
 
 def build_one(shot, imas_dir, npz_dir, cfg):
@@ -89,25 +120,20 @@ def build_one(shot, imas_dir, npz_dir, cfg):
                 return shot, False, "no lcfs_rho"
             Y = rho.astype(np.float32)
 
-            # --- features: every tier group, in tier declaration order ---
-            cols, layout, start = [], [], 0
-            for tier, groups in cfg["tiers"].items():
-                if not groups:                       # empty tier (e.g. T1) -> skip
-                    continue
-                for gname, spec in groups.items():
-                    block = _group_block(hf, spec, nt)
-                    if block is None:
-                        continue
-                    k = block.shape[1]
-                    cols.append(block)
-                    layout.append({"tier": tier, "group": gname,
-                                   "cols": [start, start + k], "n_chan": k})
-                    start += k
-            X = (np.concatenate(cols, axis=1).astype(np.float32)
-                 if cols else np.empty((nt, 0), np.float32))
+            # --- features: canonical NaN-padded column layout (same for every shot) ---
+            layout, f_total = canonical_layout(cfg)
+            X = np.full((nt, f_total), np.nan, np.float32)
+            for g in layout:
+                block = _group_block(hf, cfg["tiers"][g["tier"]][g["group"]], nt)
+                X[:, g["cols"][0]:g["cols"][1]] = block.astype(np.float32)
 
-            # --- validity: finite Y + finite X + flat-top window from ip ---
-            valid = np.isfinite(Y).all(axis=1) & np.isfinite(X).all(axis=1)
+            # --- validity: finite Y; AND flat-top window only if detection succeeds.
+            # NOTE: finiteness over X is NOT enforced here -- the sweep's pool()
+            # checks finiteness over the *selected* columns per sweep point, which
+            # is the correct granularity (a shot missing lh_power should still
+            # contribute to a T2-only sweep). If flat-top detection returns None,
+            # keep finite-Y rows as a fallback so the shot isn't dropped outright. ---
+            valid = np.isfinite(Y).all(axis=1)
             ip = _read_ds(hf, "ip", nt)
             if ip is not None:
                 win = flat_top_window(t, ip[:, 0])
@@ -118,6 +144,7 @@ def build_one(shot, imas_dir, npz_dir, cfg):
 
         if not valid.any():
             return shot, False, "no valid slices"
+        out.parent.mkdir(parents=True, exist_ok=True)
         np.savez(out, X=X, Y=Y, time=t.astype(np.float32), valid=valid)
         return shot, True, {"shot": int(shot), "layout": layout,
                             "n_slices": int(nt), "n_valid": int(valid.sum())}
@@ -152,7 +179,9 @@ def run(imas_dir=None, npz_dir=None, config_path=None, workers=1):
     ok = [p for _, good, p in results if good]
     fail = [(s, p) for s, good, p in results if not good]
 
-    layout = ok[0]["layout"] if ok else []
+    # Canonical layout is identical for every shot (NaN-padded absent channels),
+    # so derive it from the config directly rather than any single shot's payload.
+    layout, _ = canonical_layout(yml)
     theta_deg = []
     # recover theta (degrees) from any successful shot for the record
     if ok:
