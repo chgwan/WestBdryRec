@@ -186,11 +186,12 @@ def run(imas_dir=None, npz_dir=None, config_path=None, workers=1):
     # recover theta (degrees) from any successful shot for the record
     if ok:
         with h5py.File(imas_dir / f"{ok[0]['shot']}.h5", "r") as hf:
-            if "lcfs_theta" in hf:
-                theta_deg = np.degrees(np.asarray(hf["lcfs_theta"], float)).tolist()
+            theta_key = yml["target"].get("theta", "lcfs_theta")
+            if theta_key in hf:
+                theta_deg = np.degrees(np.asarray(hf[theta_key], float)).tolist()
     meta = {
         "theta_deg": theta_deg,
-        "n_angles": 32,
+        "n_angles": int(yml.get("n_angles", 32)),
         "inputs": layout,
         "shots": sorted([{k: d[k] for k in ("shot", "n_slices", "n_valid")} for d in ok],
                         key=lambda d: d["shot"]),
