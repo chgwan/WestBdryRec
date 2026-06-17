@@ -3,7 +3,10 @@
 Ip-scope detector in src/data/flat_top.py). Single signal: no ref/act split."""
 import numpy as np
 
-FLAT_THRESHOLD = 1e-3    # |normalized slope| below this is "flat"
+FLAT_THRESHOLD = 5e-2    # |normalized slope| below this is "flat". IMAS equilibrium is
+                         # reconstructed at ~10 Hz with ~5 kA jitter -> genuine flat-tops
+                         # show nd~0.01; ramps show nd~0.4. 5e-2 separates them (DCS used
+                         # 1e-3, far too strict for IMAS's coarser/noisier time base).
 MIN_SEGMENT_S = 0.5      # discard flat runs shorter than this
 Q_PCT = 20               # percentile used to refine each segment's edges
 
