@@ -53,6 +53,8 @@ def pool(npz_dir, shots, cols, max_slices=None, seed=0):
 
 def _drop_constant(Xtr, Xte):
     keep = Xtr.std(axis=0) > 0
+    if not keep.any():
+        raise ValueError("all selected features are constant on the train pool")
     return Xtr[:, keep], Xte[:, keep], int((~keep).sum())
 
 
@@ -64,6 +66,8 @@ def run_point(npz_dir, train_shots, test_shots, groups, max_slices=None,
 
     meta = load_imas_meta(npz_dir)
     cols = group_cols(meta, groups)
+    if not cols:
+        raise ValueError(f"no input columns for groups {groups}")
     Xtr, Ytr = pool(npz_dir, train_shots, cols, max_slices, seed)
     Xte, Yte = pool(npz_dir, test_shots, cols, max_slices, seed)
     Xtr, Xte, n_dropped = _drop_constant(Xtr, Xte)
