@@ -71,6 +71,10 @@ class ProjConfig(BaseSettings):
         return self.proj_db_dir / "tunes"
 
     @property
+    def inferences_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "inferences"
+
+    @property
     def shot_status_csv(self) -> pathlib.Path:
         return self.stats_dir / "shot_status.csv"
 
