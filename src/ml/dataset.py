@@ -1,4 +1,4 @@
-# src/actuator_predictor/dataset.py
+# src/ml/dataset.py
 # -*- coding: utf-8 -*-
 """Torch datasets: snapshot (M1) and actuator-sequence (M2).
 

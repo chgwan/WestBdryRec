@@ -1,12 +1,12 @@
-# src/actuator_predictor/bench.py
+# src/ml/bench.py
 # -*- coding: utf-8 -*-
 """Unified benchmarking: score a model's saved per-slice test predictions, pooled on test."""
 import json
 import pathlib
 import numpy as np
 
-from ..ml.split import split_shots_3
-from ..ml.metrics import boundary_metrics
+from .split import split_shots_3
+from .metrics import boundary_metrics
 from .predictions import load_predictions
 
 

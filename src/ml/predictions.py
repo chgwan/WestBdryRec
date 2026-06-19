@@ -1,4 +1,4 @@
-# src/actuator_predictor/predictions.py
+# src/ml/predictions.py
 # -*- coding: utf-8 -*-
 """Save/load per-shot per-slice predictions {shot:int -> (n_valid,32) float}."""
 import numpy as np

@@ -1,4 +1,4 @@
-# src/actuator_predictor/models.py
+# src/ml/models.py
 # -*- coding: utf-8 -*-
 """M1: ResMLP snapshot model. M2: Transformer over the actuator series."""
 import torch

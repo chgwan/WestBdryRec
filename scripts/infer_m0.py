@@ -17,7 +17,7 @@ import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from src.proj_config import get_proj_config          # noqa: E402
-from src.actuator_predictor import infer             # noqa: E402
+from src.ml import infer             # noqa: E402
 
 IMAS = pathlib.Path("/zhisongqu_data/chgwan/DataBase/WEST/IMAS")
 

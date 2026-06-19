@@ -1,4 +1,4 @@
-# src/actuator_predictor/features.py
+# src/ml/features.py
 # -*- coding: utf-8 -*-
 """Engineered per-slice actuator features for the M0 snapshot model.
 

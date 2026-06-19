@@ -1,4 +1,4 @@
-# src/actuator_predictor/axis_frame.py
+# src/ml/axis_frame.py
 # -*- coding: utf-8 -*-
 """Pure helpers for the axis-frame test: absolute-LCFS reconstruction from the
 axis + rho(theta), bias-aware axis metrics, and absolute (R,Z) LCFS metrics."""

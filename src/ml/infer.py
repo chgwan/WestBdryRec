@@ -1,4 +1,4 @@
-# src/actuator_predictor/infer.py
+# src/ml/infer.py
 # -*- coding: utf-8 -*-
 """M0 inference: train+save the M0 shape model + axis model, load, and predict the
 LCFS (shape lcfs_rho + absolute (R,Z) on the predicted axis) from a shot's strict-

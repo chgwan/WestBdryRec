@@ -1,4 +1,4 @@
-# src/actuator_predictor/ensemble.py
+# src/ml/ensemble.py
 # -*- coding: utf-8 -*-
 """Weighted blend of model predictions (non-negative LS weights fit on val)."""
 import numpy as np

@@ -1,4 +1,4 @@
-# src/actuator_predictor/train.py
+# src/ml/train.py
 # -*- coding: utf-8 -*-
 """Generic neural training (M1/M2) + predict-and-dump helpers.
 
