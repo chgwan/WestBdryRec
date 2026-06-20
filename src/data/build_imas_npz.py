@@ -187,6 +187,13 @@ def run(imas_dir=None, npz_dir=None, config_path=None, workers=1):
     # Canonical layout is identical for every shot (NaN-padded absent channels),
     # so derive it from the config directly rather than any single shot's payload.
     layout, _ = canonical_layout(yml)
+    # raw H5 dataset names M0 reads (for self-describing meta / features.py)
+    input_names = []
+    for _g, spec in yml["tiers"]["T0"].items():
+        if not spec:
+            continue
+        ds = spec["dataset"]
+        input_names.extend(ds if isinstance(ds, list) else [ds])
     theta_deg = []
     # recover theta (degrees) from any successful shot for the record
     if ok:
@@ -198,6 +205,7 @@ def run(imas_dir=None, npz_dir=None, config_path=None, workers=1):
         "theta_deg": theta_deg,
         "n_angles": int(yml.get("n_angles", 32)),
         "inputs": layout,
+        "input_names": input_names,
         "shots": sorted([{k: d[k] for k in ("shot", "n_slices", "n_valid")} for d in ok],
                         key=lambda d: d["shot"]),
         "n_shots": len(ok),

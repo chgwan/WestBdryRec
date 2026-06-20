@@ -47,6 +47,17 @@ inputs:                    # the strict actuators M0 reads (order: PF, b0, LH, I
 
 output: lcfs_rho           # (nt, 32) boundary radius profile ρ(θ)@32
 
+derived:                   # engineered feature names (computed in features.engineer)
+  - pf_norm                # ||PF|| / |b0|
+  - lh_plus_ic             # LH + IC heating sum
+  - time_in_flat           # t − flat_top_start
+  - cum_heat               # cumulative ∫(LH+IC)dt
+
+# field roles (names from the inputs list — used by features.engineer)
+b0_field: b0
+lh_field: lh_power_launched_total
+ic_field: ic_power_launched_total
+
 axis:                      # secondary outputs for absolute LCFS reconstruction
   - magnetic_axis_r
   - magnetic_axis_z

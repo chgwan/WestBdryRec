@@ -7,6 +7,7 @@ time-in-flat-top, cumulative heating integral). All non-circular.
 
 The raw actuator names (RAW) are read from configs/m0_model.yml (inputs list)
 — the single source of truth for what M0 reads."""
+import json
 import pathlib
 
 import h5py
@@ -18,24 +19,32 @@ from ..data.imas_flat_top import flat_top_window
 
 
 def _load_model_inputs():
-    """Read the M0 input list from configs/m0_model.yml (single source of truth
-    for what M0 reads). Returns ``(raw_names, n_pf)``."""
+    """Read M0 model config. input_names: primary = NPZ meta.json (self-describing
+    built data); fallback = m0_model.yml. derived + field roles: from m0_model.yml.
+    Returns ``(raw_names, n_pf, derived, b0_name, lh_name, ic_name)``."""
     cfg = get_proj_config()
+    # model-specific config (always m0_model.yml)
     config_path = cfg.base_dir / "configs" / "m0_model.yml"
     with open(config_path) as f:
-        yml = yaml.safe_load(f)
-    names = yml["inputs"]
+        mcfg = yaml.safe_load(f)
+    # input names: prefer meta.json (built data); fallback to m0_model.yml inputs
+    names = None
+    meta_path = cfg.imas_npz_dir / "meta.json"
+    if meta_path.exists():
+        with open(meta_path) as f:
+            names = json.load(f).get("input_names")
+    if not names:
+        names = mcfg["inputs"]
     n_pf = sum(1 for n in names if n.startswith("pf_"))
-    return names, n_pf
+    return (names, n_pf, mcfg["derived"],
+            mcfg["b0_field"], mcfg["lh_field"], mcfg["ic_field"])
 
 
-RAW, N_PF = _load_model_inputs()
-FEATURE_ORDER = RAW + ["pf_norm", "lh_plus_ic", "time_in_flat", "cum_heat"]
-
-# Named column indices (derived from config order, no magic numbers)
-_B0_IDX = RAW.index("b0")
-_LH_IDX = RAW.index("lh_power_launched_total")
-_IC_IDX = RAW.index("ic_power_launched_total")
+RAW, N_PF, DERIVED, _B0_NAME, _LH_NAME, _IC_NAME = _load_model_inputs()
+FEATURE_ORDER = RAW + DERIVED
+_B0_IDX = RAW.index(_B0_NAME)
+_LH_IDX = RAW.index(_LH_NAME)
+_IC_IDX = RAW.index(_IC_NAME)
 
 
 def _read(h, name, nt, fill=0.0):
