@@ -18,7 +18,8 @@ import numpy as np
 import torch
 from sklearn.ensemble import HistGradientBoostingRegressor
 
-from . import bench, features as F
+from . import bench
+from .dataset import engineer, FEATURE_ORDER
 from .dataset import keep_mask
 from .predictions import save_predictions
 
@@ -28,7 +29,7 @@ def _shot_xy(h5_dir, npz_dir, shot):
     f = pathlib.Path(h5_dir) / f"{int(shot)}.h5"
     if not f.exists():
         return None
-    X, vf = F.engineer(f)
+    X, vf = engineer(f)
     d = np.load(pathlib.Path(npz_dir) / f"{int(shot)}.npz")
     Y = d["Y"].astype(float)
     with h5py.File(f, "r") as h:
@@ -64,7 +65,7 @@ def train_save(h5_dir, npz_dir, out_path, hp):
     train_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
     return {"hp": hp, "train_r2": train_r2, "n_train": int(len(Ytr)),
             "n_angles": int(Ytr.shape[1]), "n_features": int(keep.sum()),
-            "kept_features": [n for n, k in zip(F.FEATURE_ORDER, keep) if k]}
+            "kept_features": [n for n, k in zip(FEATURE_ORDER, keep) if k]}
 
 
 def _device():
@@ -126,7 +127,7 @@ def train_neural(model, train_loader, val_loader, epochs=80, lr=1e-3,
 
 
 @torch.no_grad()
-def predict_dump_snapshot(model, h5_dir, npz_dir, shots, feature_fn, mean, std, out_path):
+def predict_dump_snapshot(model, h5_dir, npz_dir, shots, mean, std, out_path):
     """Run a snapshot model over ``shots`` and dump per-slice predictions.
 
     Applies the same ``keep = std > 0`` column mask used at training time, so
@@ -141,7 +142,7 @@ def predict_dump_snapshot(model, h5_dir, npz_dir, shots, feature_fn, mean, std, 
         f = pathlib.Path(h5_dir) / f"{int(s)}.h5"
         if not f.exists():
             continue
-        X, vfeat = feature_fn(f)
+        X, vfeat = engineer(f)
         d = np.load(pathlib.Path(npz_dir) / f"{int(s)}.npz")
         Y = d["Y"].astype(float)
         v = (vfeat & d["valid"].astype(bool)

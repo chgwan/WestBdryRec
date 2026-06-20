@@ -9,7 +9,7 @@ import h5py
 import joblib
 import numpy as np
 
-from . import features as F
+from .dataset import engineer
 from .axis_frame import reconstruct_absolute
 
 
@@ -26,7 +26,7 @@ def predict_shot(shot, artifact, h5_dir):
     with h5py.File(f, "r") as h:
         th = np.asarray(h["lcfs_theta"], float)
         time = np.asarray(h["time"], float)
-    X, vf = F.engineer(f)
+    X, vf = engineer(f)
     keep = artifact["keep"]
     v = vf & np.isfinite(X).all(1)
     idx = np.where(v)[0]
