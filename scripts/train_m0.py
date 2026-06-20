@@ -12,9 +12,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from src.proj_config import get_proj_config          # noqa: E402
-from src.ml import infer             # noqa: E402
-
-IMAS = pathlib.Path("/zhisongqu_data/chgwan/DataBase/WEST/IMAS")
+from src.ml import train             # noqa: E402
 
 
 def main():
@@ -24,12 +22,12 @@ def main():
     ap.add_argument("--h5-dir", default=None)
     ap.add_argument("--npz-dir", default=None)
     args = ap.parse_args()
-    h5_dir = pathlib.Path(args.h5_dir) if args.h5_dir else IMAS
+    h5_dir = pathlib.Path(args.h5_dir) if args.h5_dir else cfg.imas_h5_dir
     npz_dir = pathlib.Path(args.npz_dir) if args.npz_dir else cfg.imas_npz_dir
 
     run_dir = cfg.trains_dir / args.run
     out = run_dir / "m0_inference.joblib"
-    meta = infer.train_save(h5_dir, npz_dir, out)
+    meta = train.train_save(h5_dir, npz_dir, out)
     meta = {"run": args.run, **meta}
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     print(f"saved artifact -> {out}")

@@ -19,8 +19,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from src.proj_config import get_proj_config          # noqa: E402
 from src.ml import infer             # noqa: E402
 
-IMAS = pathlib.Path("/zhisongqu_data/chgwan/DataBase/WEST/IMAS")
-
 
 def main():
     cfg = get_proj_config()
@@ -30,7 +28,7 @@ def main():
     ap.add_argument("--artifact", default=None)
     ap.add_argument("--h5-dir", default=None)
     args = ap.parse_args()
-    h5_dir = pathlib.Path(args.h5_dir) if args.h5_dir else IMAS
+    h5_dir = pathlib.Path(args.h5_dir) if args.h5_dir else cfg.imas_h5_dir
     artifact_path = (pathlib.Path(args.artifact) if args.artifact
                      else cfg.trains_dir / args.run / "m0_inference.joblib")
     art = infer.load(artifact_path)

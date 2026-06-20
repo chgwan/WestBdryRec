@@ -1,20 +1,72 @@
 # src/ml/train.py
 # -*- coding: utf-8 -*-
-"""Generic neural training (M1/M2) + predict-and-dump helpers.
+"""Training utilities: M0 HistGBT (``train_save``) + M1/M2 neural (``train_neural``)
++ predict-and-dump helpers.
 
-``train_neural`` trains with AdamW + MSE and early-stops on val MSE.
-``predict_dump_snapshot`` / ``predict_dump_seq`` run a trained model over the
-test shots and write per-slice predictions via :func:`predictions.save_predictions`.
+``train_save`` fits the M0 shape model (32 per-angle HistGBTs) + axis model and
+pickles them. ``train_neural`` trains a snapshot regression with AdamW + MSE and
+early-stops on val MSE. ``predict_dump_snapshot`` / ``predict_dump_seq`` run a
+trained neural model over the test shots and dump per-slice predictions.
 """
 import copy
 import math
 import pathlib
 
+import h5py
+import joblib
 import numpy as np
 import torch
+from sklearn.ensemble import HistGradientBoostingRegressor
 
+from . import bench, features as F
 from .dataset import keep_mask
 from .predictions import save_predictions
+
+BEST_HP = dict(max_iter=200, max_depth=8, learning_rate=0.1, l2_regularization=1.0)
+
+
+def _shot_xy(h5_dir, npz_dir, shot):
+    """(X[valid], Y[valid], axis_r[valid], axis_z[valid]) for one shot, or None."""
+    f = pathlib.Path(h5_dir) / f"{int(shot)}.h5"
+    if not f.exists():
+        return None
+    X, vf = F.engineer(f)
+    d = np.load(pathlib.Path(npz_dir) / f"{int(shot)}.npz")
+    Y = d["Y"].astype(float)
+    with h5py.File(f, "r") as h:
+        ar = np.asarray(h["magnetic_axis_r"], float)
+        az = np.asarray(h["magnetic_axis_z"], float)
+    v = (vf & d["valid"].astype(bool) & np.isfinite(X).all(1) & np.isfinite(Y).all(1))
+    return X[v], Y[v], ar[v], az[v]
+
+
+def train_save(h5_dir, npz_dir, out_path, hp=BEST_HP):
+    """Fit M0 (32 per-angle HistGBTs) + axis model (2 HistGBTs) on the train shots;
+    save joblib {m0, axis_r, axis_z, keep}; return a meta dict."""
+    train, _val, _test = bench.load_filtered_split(npz_dir)
+    Xs, Ys, Ar, Az = [], [], [], []
+    for s in train:
+        g = _shot_xy(h5_dir, npz_dir, s)
+        if g is None:
+            continue
+        Xs.append(g[0]); Ys.append(g[1]); Ar.append(g[2]); Az.append(g[3])
+    Xtr, Ytr = np.concatenate(Xs), np.concatenate(Ys)
+    ar, az = np.concatenate(Ar), np.concatenate(Az)
+    keep = Xtr.std(0) > 0
+    Xk = Xtr[:, keep]
+    m0 = [HistGradientBoostingRegressor(**hp).fit(Xk, Ytr[:, a]) for a in range(Ytr.shape[1])]
+    axis_r = HistGradientBoostingRegressor(**hp).fit(Xk, ar)
+    axis_z = HistGradientBoostingRegressor(**hp).fit(Xk, az)
+    out_path = pathlib.Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump({"m0": m0, "axis_r": axis_r, "axis_z": axis_z, "keep": keep}, out_path)
+    pred = np.column_stack([m.predict(Xk) for m in m0])
+    ss_res = float(((Ytr - pred) ** 2).sum())
+    ss_tot = float(((Ytr - Ytr.mean(0)) ** 2).sum())
+    train_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    return {"hp": hp, "train_r2": train_r2, "n_train": int(len(Ytr)),
+            "n_angles": int(Ytr.shape[1]), "n_features": int(keep.sum()),
+            "kept_features": [n for n, k in zip(F.FEATURE_ORDER, keep) if k]}
 
 
 def _device():
