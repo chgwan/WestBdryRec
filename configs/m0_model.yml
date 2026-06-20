@@ -1,0 +1,52 @@
+# configs/m0_model.yml
+# M0 strict-actuator LCFS predictor — model + run configuration.
+# Read by scripts/train_m0.py, scripts/infer_m0.py, and src/ml/features.py.
+#
+# ── What is M0? ──────────────────────────────────────────────────────
+# M0 predicts the WEST LCFS boundary shape (lcfs_rho, 32 radii r(θ) about
+# the magnetic axis) from strict controllable actuators only:
+#   inputs  = 17 PF coil currents + b0 (toroidal field) + LH + IC heating power
+#   features = raw actuators + 4 engineered (pf_norm, lh_plus_ic, time_in_flat,
+#              cum_heat)  [all non-circular — no boundary history, no EFIT scalars]
+#   model   = 32 independent HistGradientBoostingRegressor (one per θ angle)
+#   output  = lcfs_rho (nt, 32)  [precomputed ρ(θ)@32 about the magnetic axis]
+# It also trains a 2-HistGBT axis predictor (magnetic_axis R/Z) so the
+# absolute (R,Z) LCFS can be reconstructed at inference (predict_shot).
+# Achieves pooled test R² ≈ 0.95 on the filtered 679-shot IMAS set.
+# ──────────────────────────────────────────────────────────────────────
+
+run: m0_actuator           # default training/inference run name
+
+hp:                        # HistGradientBoostingRegressor hyperparameters (M0 + axis)
+  max_iter: 200
+  max_depth: 8
+  learning_rate: 0.1
+  l2_regularization: 1.0
+
+inputs:                    # the strict actuators M0 reads (order: PF, b0, LH, IC)
+  - pf_A
+  - pf_Bb
+  - pf_Bh
+  - pf_Db
+  - pf_Dh
+  - pf_Divertor_bottom1_HFS
+  - pf_Divertor_bottom1_LFS
+  - pf_Divertor_bottom2_HFS
+  - pf_Divertor_bottom2_LFS
+  - pf_Divertor_top1_HFS
+  - pf_Divertor_top1_LFS
+  - pf_Divertor_top2_HFS
+  - pf_Divertor_top2_LFS
+  - pf_Eb
+  - pf_Eh
+  - pf_Fb
+  - pf_Fh
+  - b0
+  - lh_power_launched_total
+  - ic_power_launched_total
+
+output: lcfs_rho           # (nt, 32) boundary radius profile ρ(θ)@32
+
+axis:                      # secondary outputs for absolute LCFS reconstruction
+  - magnetic_axis_r
+  - magnetic_axis_z
