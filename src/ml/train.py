@@ -22,8 +22,6 @@ from . import bench, features as F
 from .dataset import keep_mask
 from .predictions import save_predictions
 
-BEST_HP = dict(max_iter=200, max_depth=8, learning_rate=0.1, l2_regularization=1.0)
-
 
 def _shot_xy(h5_dir, npz_dir, shot):
     """(X[valid], Y[valid], axis_r[valid], axis_z[valid]) for one shot, or None."""
@@ -40,7 +38,7 @@ def _shot_xy(h5_dir, npz_dir, shot):
     return X[v], Y[v], ar[v], az[v]
 
 
-def train_save(h5_dir, npz_dir, out_path, hp=BEST_HP):
+def train_save(h5_dir, npz_dir, out_path, hp):
     """Fit M0 (32 per-angle HistGBTs) + axis model (2 HistGBTs) on the train shots;
     save joblib {m0, axis_r, axis_z, keep}; return a meta dict."""
     train, _val, _test = bench.load_filtered_split(npz_dir)

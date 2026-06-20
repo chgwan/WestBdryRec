@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+import yaml
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from src.proj_config import get_proj_config          # noqa: E402
@@ -24,17 +25,24 @@ def main():
     cfg = get_proj_config()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--shot", type=int, required=True)
-    ap.add_argument("--run", default="m0_actuator")
+    ap.add_argument("--config", default=str(cfg.base_dir / "configs" / "m0_model.yml"))
+    ap.add_argument("--run", default=None,
+                    help="override the run name from config")
     ap.add_argument("--artifact", default=None)
     ap.add_argument("--h5-dir", default=None)
     args = ap.parse_args()
+
+    with open(args.config) as f:
+        model_cfg = yaml.safe_load(f)
+    run = args.run or model_cfg["run"]
+
     h5_dir = pathlib.Path(args.h5_dir) if args.h5_dir else cfg.imas_h5_dir
     artifact_path = (pathlib.Path(args.artifact) if args.artifact
-                     else cfg.trains_dir / args.run / "m0_inference.joblib")
+                     else cfg.trains_dir / run / "m0_inference.joblib")
     art = infer.load(artifact_path)
 
     res = infer.predict_shot(args.shot, art, h5_dir)
-    out_dir = cfg.inferences_dir / args.run
+    out_dir = cfg.inferences_dir / run
     out_dir.mkdir(parents=True, exist_ok=True)
     if res is None:
         print(f"shot {args.shot}: no valid slices (missing h5?)")
@@ -64,7 +72,7 @@ def main():
     ax[1].plot(Rt, Zt, "k-", lw=2, label="true")
     ax[1].plot(Rp, Zp, "r--", label="pred")
     ax[1].set_title("absolute LCFS (R,Z) [flat-top mean]"); ax[1].set_aspect("equal"); ax[1].legend()
-    fig.suptitle(f"shot {args.shot} (run {args.run})")
+    fig.suptitle(f"shot {args.shot} (run {run})")
     fig.tight_layout(); fig.savefig(out_dir / f"{args.shot}.png", dpi=130); plt.close(fig)
     print(f"wrote {out_dir / f'{args.shot}.npz'} + {out_dir / f'{args.shot}.png'}")
 

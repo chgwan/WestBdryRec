@@ -3,22 +3,39 @@
 """Engineered per-slice actuator features for the M0 snapshot model.
 
 Raw actuators (per slice) + per-slice derived features (ratios, heating sums,
-time-in-flat-top, cumulative heating integral). All non-circular."""
-import pathlib
-import numpy as np
-import h5py
+time-in-flat-top, cumulative heating integral). All non-circular.
 
+The raw actuator names (RAW) are read from configs/m0_model.yml (inputs list)
+— the single source of truth for what M0 reads."""
+import pathlib
+
+import h5py
+import numpy as np
+import yaml
+
+from ..proj_config import get_proj_config
 from ..data.imas_flat_top import flat_top_window
 
-RAW = ["pf_A", "pf_Bb", "pf_Bh", "pf_Db", "pf_Dh",
-       "pf_Divertor_bottom1_HFS", "pf_Divertor_bottom1_LFS",
-       "pf_Divertor_bottom2_HFS", "pf_Divertor_bottom2_LFS",
-       "pf_Divertor_top1_HFS", "pf_Divertor_top1_LFS",
-       "pf_Divertor_top2_HFS", "pf_Divertor_top2_LFS",
-       "pf_Eb", "pf_Eh", "pf_Fb", "pf_Fh", "b0",
-       "lh_power_launched_total", "ic_power_launched_total"]
 
+def _load_model_inputs():
+    """Read the M0 input list from configs/m0_model.yml (single source of truth
+    for what M0 reads). Returns ``(raw_names, n_pf)``."""
+    cfg = get_proj_config()
+    config_path = cfg.base_dir / "configs" / "m0_model.yml"
+    with open(config_path) as f:
+        yml = yaml.safe_load(f)
+    names = yml["inputs"]
+    n_pf = sum(1 for n in names if n.startswith("pf_"))
+    return names, n_pf
+
+
+RAW, N_PF = _load_model_inputs()
 FEATURE_ORDER = RAW + ["pf_norm", "lh_plus_ic", "time_in_flat", "cum_heat"]
+
+# Named column indices (derived from config order, no magic numbers)
+_B0_IDX = RAW.index("b0")
+_LH_IDX = RAW.index("lh_power_launched_total")
+_IC_IDX = RAW.index("ic_power_launched_total")
 
 
 def _read(h, name, nt, fill=0.0):
@@ -35,10 +52,10 @@ def engineer(h5_path):
     with h5py.File(h5_path, "r") as h:
         t = np.asarray(h["time"], float)
         nt = t.size
-        raw = np.column_stack([_read(h, n, nt, fill=0.0) for n in RAW])  # (nt, 20)
-        pf = raw[:, :17]
-        b0 = raw[:, 17]
-        lh = raw[:, 18]; ic = raw[:, 19]
+        raw = np.column_stack([_read(h, n, nt, fill=0.0) for n in RAW])
+        pf = raw[:, :N_PF]
+        b0 = raw[:, _B0_IDX]
+        lh = raw[:, _LH_IDX]; ic = raw[:, _IC_IDX]
         ip = _read(h, "ip", nt, fill=np.nan)
         # derived (non-circular, per-slice)
         pf_norm = np.linalg.norm(pf, axis=1) / np.maximum(np.abs(b0), 1e-9)
