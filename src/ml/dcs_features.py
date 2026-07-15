@@ -38,9 +38,6 @@ def strict_channels(cfg):
     return [(c["node"], c["kind"], c["nan"]) for c in cfg["channels"]]
 
 
-_DERIVED = 4  # pf_norm, lh_plus_ic, cum_heat, time_rel
-
-
 def _apply_nan(col, policy, essential_mask):
     """Return a finite column and the updated essential mask.
 
@@ -71,7 +68,7 @@ def read_snapshot(npz_path, cfg, ncm):
     heat = raw[:, [k for k, kd in enumerate(kinds) if kd in ("lh", "ic")]].sum(axis=1)
     dt = np.gradient(t)
     cum = np.concatenate([[0.0], np.cumsum(heat[:-1] * dt[1:])])
-    derived = np.column_stack([np.linalg.norm(pf, axis=1), heat, t - t[0], cum])
+    derived = np.column_stack([np.linalg.norm(pf, axis=1), heat, cum, t - t[0]])
     feats = np.column_stack([raw, derived]).astype(np.float32)
     return feats, valid & essential
 
