@@ -21,6 +21,8 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from . import bench
 from .dataset import engineer, FEATURE_ORDER
 from .dataset import keep_mask
+from .dcs_features import load_dcs_config, load_meta, node_col_map, read_snapshot
+from .metrics import ccc
 from .predictions import save_predictions
 
 
@@ -66,6 +68,43 @@ def train_save(h5_dir, npz_dir, out_path, hp):
     return {"hp": hp, "train_r2": train_r2, "n_train": int(len(Ytr)),
             "n_angles": int(Ytr.shape[1]), "n_features": int(keep.sum()),
             "kept_features": [n for n, k in zip(FEATURE_ORDER, keep) if k]}
+
+
+def train_m0_dcs(npz_dir, out_path, cfg=None, shots=None, max_per_shot=None):
+    """Fit 32 per-angle HistGBT on the DCS strict-actuator snapshot. No axis model.
+
+    ``shots=None`` uses the split's train shots; pass a list to override (tests).
+    """
+    cfg = cfg or load_dcs_config()
+    hp = cfg["hp"]["m0"]
+    npz_dir = pathlib.Path(npz_dir)
+    train = shots if shots is not None else bench.load_filtered_split(npz_dir)[0]
+    ncm = node_col_map(load_meta(npz_dir))
+    mps = max_per_shot if max_per_shot is not None else cfg.get("max_per_shot")
+    rng = np.random.default_rng(0)
+    Xs, Ys = [], []
+    for s in train:
+        p = npz_dir / f"{int(s)}.npz"
+        if not p.exists():
+            continue
+        feats, mask = read_snapshot(p, cfg, ncm)
+        Y = np.load(p)["Y"].astype(float)
+        v = mask & np.isfinite(Y).all(1) & np.isfinite(feats).all(1)
+        idx = np.where(v)[0]
+        if mps and idx.size > mps:
+            idx = np.sort(rng.choice(idx, mps, replace=False))
+        if idx.size:
+            Xs.append(feats[idx]); Ys.append(Y[idx])
+    Xtr, Ytr = np.concatenate(Xs), np.concatenate(Ys)
+    keep = keep_mask(Xtr.std(0))
+    Xk = Xtr[:, keep]
+    m0 = [HistGradientBoostingRegressor(**hp).fit(Xk, Ytr[:, a]) for a in range(Ytr.shape[1])]
+    out_path = pathlib.Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump({"m0": m0, "keep": keep, "cfg": cfg}, out_path)
+    pred = np.column_stack([m.predict(Xk) for m in m0])
+    return {"n_train": int(len(Ytr)), "n_features": int(keep.sum()),
+            "train_ccc": float(ccc(pred, Ytr))}
 
 
 def _device():
