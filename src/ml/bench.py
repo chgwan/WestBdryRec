@@ -6,7 +6,7 @@ import pathlib
 import numpy as np
 
 from .split import split_shots_3
-from .metrics import boundary_metrics
+from .metrics import boundary_metrics, ccc
 from .predictions import load_predictions
 
 
@@ -32,7 +32,8 @@ def score_predictions(pred_path, npz_dir, train_shots, test_shots):
     preds = load_predictions(pred_path)
     ytr = np.concatenate([_shot_y(npz_dir, s) for s in train_shots])
     y_train_mean = ytr.mean(axis=0)
-    yp_all, yt_all, per_shot = [], [], []
+    yp_all, yt_all = [], []
+    per_shot, per_shot_ccc = [], []
     for s in test_shots:
         s = int(s)
         if s not in preds:
@@ -43,8 +44,10 @@ def score_predictions(pred_path, npz_dir, train_shots, test_shots):
             continue                                 # mis-aligned; skip defensively
         yp_all.append(yp); yt_all.append(yt)
         per_shot.append(_per_shot_r2(yp, yt, y_train_mean))
+        per_shot_ccc.append(ccc(yp, yt))
     m = boundary_metrics(np.concatenate(yp_all), np.concatenate(yt_all),
                          y_train_mean=y_train_mean)
     m["per_shot_r2"] = per_shot
+    m["per_shot_ccc"] = per_shot_ccc
     m["n_shots"] = len(per_shot)
     return m

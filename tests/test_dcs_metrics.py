@@ -42,6 +42,25 @@ def test_ccc_row_mask_perfect():
     assert abs(ccc(y, y, mask=rowmask) - 1.0) < 1e-9
 
 
+def test_score_predictions_reports_ccc(tmp_path=None):
+    import json
+    import tempfile
+    from src.ml.bench import score_predictions
+    from src.ml.predictions import save_predictions
+    if tmp_path is None:
+        tmp_path = pathlib.Path(tempfile.mkdtemp())
+    npz = tmp_path / "data"; npz.mkdir()
+    yt = np.random.default_rng(2).normal(size=(6, 32))
+    ytr = np.random.default_rng(3).normal(size=(10, 32))
+    for i, arr in enumerate([yt, ytr], start=1):
+        np.savez(npz / f"{i}.npz", Y=arr.astype(np.float32), valid=np.ones(len(arr), dtype=bool))
+    json.dump({"shots": [{"shot": 1}, {"shot": 2}]}, (npz / "meta.json").open("w"))
+    pred_path = tmp_path / "pred.npz"
+    save_predictions(pred_path, {1: yt.copy()})  # shot 1 = test
+    m = score_predictions(pred_path, str(npz), train_shots=[2], test_shots=[1])
+    assert "ccc" in m and "per_shot_ccc" in m and len(m["per_shot_ccc"]) == 1
+
+
 def _run():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
