@@ -3,6 +3,24 @@
 import numpy as np
 
 
+def ccc(y_pred, y_true, mask=None):
+    """Lin's concordance correlation coefficient pooled over the given pairs.
+
+    Returns a float in [-1, 1]: 1 = perfect agreement on the y=x line.
+    """
+    yp = np.asarray(y_pred, float).reshape(-1)
+    yt = np.asarray(y_true, float).reshape(-1)
+    if mask is not None:
+        m = np.asarray(mask, bool).reshape(-1)
+        yp, yt = yp[m], yt[m]
+    if yp.size < 2:
+        return float("nan")
+    mx, my = yp.mean(), yt.mean()
+    sxy = float(((yp - mx) * (yt - my)).mean())
+    denom = float(yp.var() + yt.var() + (mx - my) ** 2)
+    return float(2.0 * sxy / denom) if denom > 0 else float("nan")
+
+
 def boundary_metrics(y_pred, y_true, mask=None, y_train_mean=None):
     """Boundary metrics (meters). ``mask`` (N,) bool selects rows; ``y_train_mean``
     is the per-angle train mean used as the cross-shot floor baseline.
@@ -23,5 +41,5 @@ def boundary_metrics(y_pred, y_true, mask=None, y_train_mean=None):
     sim = float((num / np.clip(den, 1e-12, None)).mean())
     rmse = float(np.sqrt(((yt - yp) ** 2).mean()))
     floor = float(np.sqrt(((yt - ybar) ** 2).mean()))
-    return {"similarity": sim, "r2": float(r2),
+    return {"similarity": sim, "r2": float(r2), "ccc": ccc(yp, yt),
             "rmse_cm": rmse * 100, "floor_cm": floor * 100, "n": int(yt.shape[0])}
