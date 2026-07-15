@@ -36,6 +36,12 @@ def test_boundary_metrics_includes_ccc():
     assert "ccc" in m and abs(m["ccc"] - 1.0) < 1e-9
 
 
+def test_ccc_row_mask_perfect():
+    y = np.random.default_rng(4).normal(size=(6, 32))
+    rowmask = np.array([True, True, False, True, True, True])
+    assert abs(ccc(y, y, mask=rowmask) - 1.0) < 1e-9
+
+
 def _run():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

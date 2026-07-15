@@ -8,11 +8,12 @@ def ccc(y_pred, y_true, mask=None):
 
     Returns a float in [-1, 1]: 1 = perfect agreement on the y=x line.
     """
-    yp = np.asarray(y_pred, float).reshape(-1)
-    yt = np.asarray(y_true, float).reshape(-1)
+    yp = np.asarray(y_pred, float)
+    yt = np.asarray(y_true, float)
     if mask is not None:
-        m = np.asarray(mask, bool).reshape(-1)
+        m = np.asarray(mask, bool)
         yp, yt = yp[m], yt[m]
+    yp, yt = yp.reshape(-1), yt.reshape(-1)
     if yp.size < 2:
         return float("nan")
     mx, my = yp.mean(), yt.mean()
@@ -25,7 +26,7 @@ def boundary_metrics(y_pred, y_true, mask=None, y_train_mean=None):
     """Boundary metrics (meters). ``mask`` (N,) bool selects rows; ``y_train_mean``
     is the per-angle train mean used as the cross-shot floor baseline.
 
-    Returns {similarity, r2, rmse_cm, floor_cm, n}.
+    Returns {similarity, r2, ccc, rmse_cm, floor_cm, n}.
     """
     yp = np.asarray(y_pred, float)
     yt = np.asarray(y_true, float)
