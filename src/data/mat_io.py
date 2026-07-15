@@ -31,7 +31,7 @@ from ..proj_config import get_proj_config
 
 _cfg = get_proj_config()
 
-DEFAULT_DCS_DIR = _cfg.dcs_org_dir
+DEFAULT_DCS_DIR = _cfg.dcsheating_dir   # raw DCS archives (DCS_archive_<shot>.mat)
 DEFAULT_CFG = _cfg.base_config_f
 DEFAULT_OUTDIR = _cfg.stats_dir
 # (label, index) pairs for the columns of each scope's values matrix.

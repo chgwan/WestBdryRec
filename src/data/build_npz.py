@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Build per-shot NPZ arrays for polar-r(theta) LCFS prediction.
 
-Reads each time-aligned ``Merged/<shot>.h5`` and writes ``ProjDB/Npz/<shot>.npz``
+Reads each time-aligned ``MergedH5/<shot>.h5`` and writes ``ProjDB/datasets/MergedNpz/<shot>.npz``
 with the input feature matrix ``X``, the polar target ``Y = r(theta)`` about the
 fixed origin ``(2.5, 0)``, the raw boundary ``bnd_RZ`` (R,Z), the ``time`` vector
 and a ``valid`` mask, trimmed to the discharge window. A shared ``meta.json``
@@ -177,21 +177,24 @@ def _read_channel(hf, ds_path, i0, i1):
 def reduce_stats(per_shot, eps):
     """Fold per-shot streaming stats into mean/std for X and Y.
 
-    Each entry of ``per_shot`` is a dict with array fields ``X_sum`` / ``X_sumsq``
-    (length F), ``Y_sum`` / ``Y_sumsq`` (length n_angles) and scalar ``n_valid``,
-    each summed over that shot's valid slices. Returns
-    ``{X_mean, X_std, Y_mean, Y_std, n_valid}``; std is the population std,
-    floored at ``eps`` (guards constant features so downstream standardization
-    never divides by ~0).
+    Each entry of ``per_shot`` carries ``X_sum`` / ``X_sumsq`` / ``X_cnt`` (length
+    F; summed over that shot's valid rows, finite-only per column since X may hold
+    NaN), ``Y_sum`` / ``Y_sumsq`` (length n_angles) and scalar ``n_valid``. Returns
+    ``{X_mean, X_std, Y_mean, Y_std, n_valid}``; std is the population std, floored
+    at ``eps``. X columns with no finite values collapse to mean 0 / std eps.
     """
     x_sum = np.sum([np.asarray(d["X_sum"], float) for d in per_shot], axis=0)
     x_sumsq = np.sum([np.asarray(d["X_sumsq"], float) for d in per_shot], axis=0)
+    x_cnt = np.sum([np.asarray(d["X_cnt"], float) for d in per_shot], axis=0)
     y_sum = np.sum([np.asarray(d["Y_sum"], float) for d in per_shot], axis=0)
     y_sumsq = np.sum([np.asarray(d["Y_sumsq"], float) for d in per_shot], axis=0)
     n = float(sum(int(d["n_valid"]) for d in per_shot))
-    x_mean = x_sum / n
+    with np.errstate(invalid="ignore", divide="ignore"):
+        denom = np.maximum(x_cnt, 1.0)
+        x_mean = np.where(x_cnt > 0, x_sum / denom, 0.0)
+        x_std = np.sqrt(np.maximum(np.where(x_cnt > 0, x_sumsq / denom, 0.0)
+                                   - x_mean ** 2, 0.0))
     y_mean = y_sum / n
-    x_std = np.sqrt(np.maximum(x_sumsq / n - x_mean ** 2, 0.0))
     y_std = np.sqrt(np.maximum(y_sumsq / n - y_mean ** 2, 0.0))
     out = {"X_mean": x_mean, "X_std": np.maximum(x_std, eps),
            "Y_mean": y_mean, "Y_std": np.maximum(y_std, eps), "n_valid": n}
@@ -227,7 +230,8 @@ def _build_one(args):
             time = np.asarray(hf["time"][i0:i1 + 1], float)
             nt = time.size
 
-            # X: one column per input channel (1-D scope trace on the shared grid)
+            # X: one column per input channel (1-D scope trace on the shared grid).
+            # Absent / short channels are kept as NaN (faithful); nothing is imputed.
             F = len(channels)
             X = np.full((nt, F), np.nan, np.float32)
             for k, (_inp, ds_path, _node) in enumerate(channels):
@@ -243,24 +247,32 @@ def _build_one(args):
                 Y[t] = radii_on_grid(R[:, t], Z[:, t], origin, theta)
             bnd_RZ = np.transpose(g, (2, 0, 1)).astype(np.float32)  # (nt,32,2)
 
-            valid = (np.isfinite(X).all(axis=1) & np.isfinite(Y).all(axis=1))
+            # Keep every slice except those with no usable data at all (X and Y both
+            # fully NaN). Faithful NaN in individual channels is preserved for
+            # downstream to filter -- it is not a reason to drop a slice here.
+            valid = ~(~np.isfinite(X).any(axis=1) & ~np.isfinite(Y).any(axis=1))
             if not valid.any():
                 return shot, False, "zero valid slices"
 
             S = read_scalars(hf, i0, i1, nt)                 # (nt, N_SCALARS)
             s_valid = valid & np.isfinite(S).all(axis=1)
 
-            # streaming stats over valid rows (float64 for stable accumulation)
+            # streaming stats over valid rows (float64 for stable accumulation).
+            # X may carry NaN (absent channels) -> accumulate per column over its
+            # finite values only, tracked via X_cnt; Y/S are finite on valid rows.
             Xv = X[valid].astype(np.float64)
             Yv = Y[valid].astype(np.float64)
             Sv = S[s_valid].astype(np.float64)
+            fin_X = np.isfinite(Xv)
 
             np.savez(out, X=X.astype(np.float32), Y=Y, S=S, bnd_RZ=bnd_RZ,
                      time=time.astype(np.float32), valid=valid)
         return shot, True, {
             "shot": int(shot), "n_slices": int(nt),
             "t_start": float(time[0]), "t_end": float(time[-1]),
-            "X_sum": Xv.sum(0), "X_sumsq": (Xv * Xv).sum(0),
+            "X_sum": np.where(fin_X, Xv, 0.0).sum(0),
+            "X_sumsq": np.where(fin_X, Xv * Xv, 0.0).sum(0),
+            "X_cnt": fin_X.sum(axis=0),
             "Y_sum": Yv.sum(0), "Y_sumsq": (Yv * Yv).sum(0),
             "n_valid": int(valid.sum()),
             "S_sum": Sv.sum(0), "S_sumsq": (Sv * Sv).sum(0),
@@ -280,8 +292,8 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
     diagnostic scope traces). Target is always ``targets/GMAG_BND``.
     """
     cfg = get_proj_config()
-    merged_dir = pathlib.Path(merged_dir) if merged_dir else cfg.merged_dir
-    npz_dir = pathlib.Path(npz_dir) if npz_dir else cfg.npz_dir
+    merged_dir = pathlib.Path(merged_dir) if merged_dir else cfg.mergedh5_dir
+    npz_dir = pathlib.Path(npz_dir) if npz_dir else cfg.mergednpz_dir
     config_path = (pathlib.Path(config_path) if config_path else cfg.base_config_f)
     target_node = "GMAG_BND"
 

@@ -21,36 +21,36 @@ class ProjConfig(BaseSettings):
     downsample_tol: float = 0.9     # < this * nominal => "downsampled"
     flat_top_min_s: float = 3.0     # keep shots whose total Ip flat-top exceeds this
 
-    # --- WEST boundary data subdirs (derived from DATABASE_dir) ---
+    # --- new ignitron-time-aligned dataset (DCSHeating .mat + GMagH5 .h5 -> MergedH5) ---
+    # Both sources use t=0 at the ignitron, so no ref-onset shift is needed.
     @property
-    def dcs_org_dir(self) -> pathlib.Path:
-        return self.DATABASE_dir / "DCSOrg"
+    def dcsheating_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "datasets" / "DCSHeating"
 
     @property
-    def dcs_h5_dir(self) -> pathlib.Path:
-        return self.DATABASE_dir / "DCSH5"
+    def gmagh5_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "datasets" / "GMagH5"
 
     @property
-    def data_org_dir(self) -> pathlib.Path:
-        return self.DATABASE_dir / "DataOrg"
+    def mergedh5_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "datasets" / "MergedH5"
 
     @property
-    def merged_dir(self) -> pathlib.Path:
-        return self.DATABASE_dir / "Merged"
+    def mergednpz_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "datasets" / "MergedNpz"
 
     @property
     def npz_dir(self) -> pathlib.Path:
-        return self.proj_db_dir / "Npz"
+        return self.proj_db_dir / "datasets" / "Npz"
 
     # --- IMAS-native LCFS sweep layout ---
-    @property
+    # @property
     def imas_h5_dir(self) -> pathlib.Path:
-        # IMAS/<shot>.h5 sits next to Boundary/: <DATABASE_PATH>/DataBase/WEST/IMAS
-        return self.DATABASE_dir.parent / "IMAS"
+        return self.proj_db_dir / "datasets" / "datasets"
 
     @property
     def imas_npz_dir(self) -> pathlib.Path:
-        return self.proj_db_dir / "Npz" / "imas"
+        return self.proj_db_dir / "datasets" / "IMASNpz"
 
     @property
     def imas_sweep_stats_dir(self) -> pathlib.Path:

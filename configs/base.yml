@@ -21,7 +21,7 @@ nodes:
   # SMAG_IP: ["SMAG_IP"]
 
 data:
-  database_dir: $DATABASE_PATH/DataBase/WEST/Boundary
+  database_dir: ProjDB/datasets
   input_list: [
     "LHW_real",
     "ICRH_phase_real",
