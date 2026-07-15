@@ -18,12 +18,16 @@ import numpy as np
 import torch
 from sklearn.ensemble import HistGradientBoostingRegressor
 
+from torch.utils.data import DataLoader
+
 from . import bench
 from .dataset import engineer, FEATURE_ORDER
 from .dataset import keep_mask
 from .dcs_features import load_dcs_config, load_meta, node_col_map, read_snapshot
 from .metrics import ccc
+from .models import ResMLP
 from .predictions import save_predictions
+from .split import split_shots_3
 
 
 def _shot_xy(h5_dir, npz_dir, shot):
@@ -105,6 +109,79 @@ def train_m0_dcs(npz_dir, out_path, cfg=None, shots=None, max_per_shot=None):
     pred = np.column_stack([m.predict(Xk) for m in m0])
     return {"n_train": int(len(Ytr)), "n_features": int(keep.sum()),
             "train_ccc": float(ccc(pred, Ytr))}
+
+
+class DCSSnapshotDataset(torch.utils.data.Dataset):
+    """Per-slice (engineered strict-actuator snapshot -> rho) over a shot set."""
+
+    def __init__(self, npz_dir, shots, cfg, ncm, mean, std, max_per_shot=None):
+        self.keep = np.asarray(std, float) > 0
+        self.mean = np.asarray(mean, float)[self.keep]
+        self.std = np.asarray(std, float)[self.keep]
+        self.rows = []
+        rng = np.random.default_rng(0)
+        mps = max_per_shot if max_per_shot is not None else cfg.get("max_per_shot")
+        for s in shots:
+            p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+            if not p.exists():
+                continue
+            feats, mask = read_snapshot(p, cfg, ncm)
+            Y = np.load(p)["Y"].astype(np.float32)
+            v = mask & np.isfinite(Y).all(1) & np.isfinite(feats).all(1)
+            idx = np.where(v)[0]
+            if mps and idx.size > mps:
+                idx = np.sort(rng.choice(idx, mps, replace=False))
+            Xk = feats[:, self.keep]
+            for i in idx:
+                self.rows.append((Xk[i], Y[i]))
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, i):
+        x, y = self.rows[i]
+        x = (x - self.mean) / self.std
+        return torch.from_numpy(x.astype(np.float32)), torch.from_numpy(y)
+
+
+def _dcs_train_mean_std(npz_dir, shots, cfg, ncm):
+    feats = []
+    for s in shots:
+        p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+        if not p.exists():
+            continue
+        f, m = read_snapshot(p, cfg, ncm)
+        if m.any():
+            feats.append(f[m])
+    X = np.concatenate(feats)
+    return X.mean(0), X.std(0)
+
+
+def train_m1_dcs(npz_dir, out_path, cfg=None, shots=None):
+    """Train ResMLP on the DCS snapshot; val early-stop; save torch state."""
+    cfg = cfg or load_dcs_config()
+    npz_dir = pathlib.Path(npz_dir)
+    if shots is None:
+        train, val, _ = bench.load_filtered_split(npz_dir)
+    else:
+        train, val = split_shots_3(list(shots))[:2]
+    ncm = node_col_map(load_meta(npz_dir))
+    mean, std = _dcs_train_mean_std(npz_dir, train, cfg, ncm)
+    ds_tr = DCSSnapshotDataset(npz_dir, train, cfg, ncm, mean, std)
+    ds_va = DCSSnapshotDataset(npz_dir, val, cfg, ncm, mean, std)
+    keep = ds_tr.keep
+    model = ResMLP(n_in=int(keep.sum()), hidden=cfg["hp"]["m1"]["hidden"],
+                   depth=cfg["hp"]["m1"]["depth"], dropout=cfg["hp"]["m1"]["dropout"])
+    hpm = cfg["hp"]["m1"]
+    train_neural(model, DataLoader(ds_tr, batch_size=2048, shuffle=True),
+                 DataLoader(ds_va, batch_size=2048), epochs=hpm["epochs"],
+                 lr=hpm["lr"], patience=hpm["patience"])
+    out_path = pathlib.Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state": model.state_dict(), "keep": keep, "hp": hpm,
+                "n_in": int(keep.sum()), "mean": mean, "std": std}, out_path)
+    return {"best_val_mse": float(model.best_val_mse),
+            "stop_epoch": int(model.stop_epoch), "n_in": int(keep.sum())}
 
 
 def _device():

@@ -22,6 +22,20 @@ def test_m0_dcs_smoke(tmp_path):
     assert out.exists() and np.isfinite(meta["train_ccc"]) and meta["n_train"] > 0
 
 
+def test_m1_dcs_smoke(tmp_path):
+    import numpy as np
+    from src.ml.train import train_m1_dcs
+    if not _have():
+        return
+    out = tmp_path / "m1.pt"
+    cfg_override = None
+    import src.ml.dcs_features as df
+    cfg_override = df.load_dcs_config()
+    cfg_override["hp"]["m1"]["epochs"] = 2
+    meta = train_m1_dcs(str(NPZ), out, cfg=cfg_override, shots=FEW)
+    assert out.exists() and np.isfinite(meta["best_val_mse"])
+
+
 def _run():
     import tempfile
     for name, fn in sorted(globals().items()):
