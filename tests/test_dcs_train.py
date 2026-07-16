@@ -36,6 +36,19 @@ def test_m1_dcs_smoke(tmp_path):
     assert out.exists() and np.isfinite(meta["best_val_mse"])
 
 
+def test_m2_dcs_smoke(tmp_path):
+    import numpy as np
+    from src.ml.train import train_m2_dcs
+    if not _have():
+        return
+    out = tmp_path / "m2.pt"
+    import src.ml.dcs_features as df
+    cfg_override = df.load_dcs_config()
+    cfg_override["hp"]["m2"]["epochs"] = 2
+    meta = train_m2_dcs(str(NPZ), out, cfg=cfg_override, shots=FEW)
+    assert out.exists() and np.isfinite(meta["best_val_mse"])
+
+
 def _run():
     import tempfile
     for name, fn in sorted(globals().items()):

@@ -23,9 +23,9 @@ from torch.utils.data import DataLoader
 from . import bench
 from .dataset import engineer, FEATURE_ORDER
 from .dataset import keep_mask
-from .dcs_features import load_dcs_config, load_meta, node_col_map, read_snapshot
+from .dcs_features import load_dcs_config, load_meta, node_col_map, read_snapshot, read_series
 from .metrics import ccc
-from .models import ResMLP
+from .models import ResMLP, ActSeqGRU
 from .predictions import save_predictions
 from .split import split_shots_3
 
@@ -182,6 +182,103 @@ def train_m1_dcs(npz_dir, out_path, cfg=None, shots=None):
                 "n_in": int(keep.sum()), "mean": mean, "std": std}, out_path)
     return {"best_val_mse": float(model.best_val_mse),
             "stop_epoch": int(model.stop_epoch), "n_in": int(keep.sum())}
+
+
+class DCSSeqDataset(torch.utils.data.Dataset):
+    """Per-shot full actuator series (n_act -> 32 rho per step) over a shot set.
+
+    Each item is one whole shot: ``(A(L, n_act), Y(L, 32), mask(L,))``. The
+    series is not subsampled (the GRU is linear-time). Normalization uses the
+    per-channel mean/std over valid steps; invalid steps are kept (zeroed by
+    ``read_series``) and masked out of the loss by the trainer.
+    """
+
+    def __init__(self, npz_dir, shots, cfg, ncm, mean, std):
+        self.mean = np.asarray(mean, float)
+        self.std = np.maximum(np.asarray(std, float), 1e-6)
+        self.rows = []
+        n_act = None
+        for s in shots:
+            p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+            if not p.exists():
+                continue
+            A, mask = read_series(p, cfg, ncm)
+            Y = np.load(p)["Y"].astype(np.float32)
+            v = mask & np.isfinite(Y).all(1) & np.isfinite(A).all(1)
+            self.rows.append((A, Y, v))
+            n_act = A.shape[1]
+        self.n_act = int(n_act) if n_act is not None else 0
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, i):
+        A, Y, m = self.rows[i]
+        A = ((A - self.mean) / self.std).astype(np.float32)
+        return (torch.from_numpy(A), torch.from_numpy(Y),
+                torch.from_numpy(m))
+
+
+def _dcs_series_mean_std(npz_dir, shots, cfg, ncm):
+    feats = []
+    for s in shots:
+        p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+        if not p.exists():
+            continue
+        a, m = read_series(p, cfg, ncm)
+        if m.any():
+            feats.append(a[m])
+    X = np.concatenate(feats)
+    return X.mean(0), X.std(0)
+
+
+def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
+    """Train ActSeqGRU on the DCS actuator series with masked MSE; val early-stop."""
+    cfg = cfg or load_dcs_config()
+    npz_dir = pathlib.Path(npz_dir)
+    if shots is None:
+        train, val, _ = bench.load_filtered_split(npz_dir)
+    else:
+        train, val = split_shots_3(list(shots))[:2]
+    ncm = node_col_map(load_meta(npz_dir))
+    mean, std = _dcs_series_mean_std(npz_dir, train, cfg, ncm)
+    ds_tr = DCSSeqDataset(npz_dir, train, cfg, ncm, mean, std)
+    ds_va = DCSSeqDataset(npz_dir, val, cfg, ncm, mean, std)
+    hpm = cfg["hp"]["m2"]
+    model = ActSeqGRU(n_act=ds_tr.n_act, hidden=hpm["hidden"], layers=hpm["layers"],
+                      dropout=hpm["dropout"]).to(_device())
+    opt = torch.optim.AdamW(model.parameters(), lr=hpm["lr"], weight_decay=1e-5)
+    best, best_state, bad = 1e9, None, 0
+    for ep in range(hpm["epochs"]):
+        model.train()
+        for A, Y, m in DataLoader(ds_tr, batch_size=1, shuffle=True):
+            A = A.to(_device()).float(); Y = Y.to(_device()).float()
+            mk = m.to(_device()).bool()
+            pred = model(A, mk)
+            w = mk.unsqueeze(-1).float()
+            loss = (((pred - Y) ** 2) * w).sum() / w.sum().clamp(min=1.0)
+            opt.zero_grad(); loss.backward(); opt.step()
+        model.eval(); vl, n = 0.0, 0
+        with torch.no_grad():
+            for A, Y, m in DataLoader(ds_va, batch_size=1):
+                A = A.to(_device()).float(); Y = Y.to(_device()).float()
+                mk = m.to(_device()).bool()
+                pred = model(A, mk); w = mk.unsqueeze(-1).float()
+                vl += float((((pred - Y) ** 2) * w).sum()); n += int(w.sum().item())
+        vl = vl / max(n, 1)
+        if vl < best - 1e-7:
+            best, best_state, bad = vl, copy.deepcopy(model.state_dict()), 0
+        else:
+            bad += 1
+            if bad >= hpm["patience"]:
+                break
+    if best_state:
+        model.load_state_dict(best_state)
+    out_path = pathlib.Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state": model.state_dict(), "n_act": ds_tr.n_act, "hp": hpm,
+                "mean": mean, "std": std}, out_path)
+    model.best_val_mse = float(best)
+    return {"best_val_mse": float(best), "n_act": ds_tr.n_act}
 
 
 def _device():

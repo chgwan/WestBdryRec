@@ -28,4 +28,4 @@ max_per_shot: 300
 hp:
   m0: {max_iter: 200, max_depth: 8, learning_rate: 0.1, l2_regularization: 1.0}
   m1: {hidden: 256, depth: 4, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}
-  m2: {d: 64, heads: 4, depth: 3, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}
+  m2: {hidden: 64, layers: 2, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}

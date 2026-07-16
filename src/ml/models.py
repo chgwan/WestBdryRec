@@ -59,3 +59,25 @@ class ActSeqTransformer(nn.Module):
         h = self.in_proj(x) + self.pos[:, : x.size(1)]
         h = self.tr(h, src_key_padding_mask=~mask)
         return self.out(self.norm(h))                # (B, L, n_out)
+
+
+class ActSeqGRU(nn.Module):
+    """M2 (DCS): actuator series (B, L, n_act) + mask -> 32 rho per step.
+
+    Linear-time GRU encoder (handles the full ~40-58k-step DCS series).
+    ``mask`` (B, L) bool is accepted for API parity with the predict path; the
+    GRU runs over all steps and the loss masks invalid steps externally.
+    """
+
+    def __init__(self, n_act, n_out=32, hidden=64, layers=2, dropout=0.1):
+        super().__init__()
+        self.in_proj = nn.Linear(n_act, hidden)
+        self.gru = nn.GRU(hidden, hidden, num_layers=layers, batch_first=True,
+                          dropout=dropout if layers > 1 else 0.0)
+        self.norm = nn.LayerNorm(hidden)
+        self.out = nn.Linear(hidden, n_out)
+
+    def forward(self, x, mask):                       # x (B,L,n_act), mask (B,L) bool
+        h = self.in_proj(x)
+        h, _ = self.gru(h)
+        return self.out(self.norm(h))                 # (B, L, n_out)
