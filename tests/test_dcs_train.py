@@ -49,6 +49,19 @@ def test_m2_dcs_smoke(tmp_path):
     assert out.exists() and np.isfinite(meta["best_val_mse"])
 
 
+def test_train_dcs_cli_m0(tmp_path):
+    import subprocess, sys, csv
+    if not _have():
+        return  # data not present in this environment
+    env_out = tmp_path / "out.csv"
+    rc = subprocess.run([sys.executable, "scripts/train_dcs.py", "m0",
+                         "--shots", "57821", "58088", "58084", "58086", "58087",
+                         "--bench-out", str(env_out)], check=False).returncode
+    assert rc == 0
+    rows = list(csv.DictReader(env_out.open()))
+    assert rows and rows[0]["model"] == "m0" and float(rows[0]["ccc"]) == float(rows[0]["ccc"])
+
+
 def _run():
     import tempfile
     for name, fn in sorted(globals().items()):
