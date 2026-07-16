@@ -66,8 +66,7 @@ def read_snapshot(npz_path, cfg, ncm):
         kinds.append(kind)
     pf = raw[:, [k for k, kd in enumerate(kinds) if kd == "pf"]]
     heat = raw[:, [k for k, kd in enumerate(kinds) if kd in ("lh", "ic")]].sum(axis=1)
-    dt = np.gradient(t)
-    cum = np.concatenate([[0.0], np.cumsum(heat[:-1] * dt[1:])])
+    cum = np.concatenate([[0.0], np.cumsum(heat[:-1] * np.diff(t))])
     derived = np.column_stack([np.linalg.norm(pf, axis=1), heat, cum, t - t[0]])
     feats = np.column_stack([raw, derived]).astype(np.float32)
     return feats, valid & essential

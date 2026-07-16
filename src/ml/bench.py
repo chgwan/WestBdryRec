@@ -41,7 +41,9 @@ def score_predictions(pred_path, npz_dir, train_shots, test_shots):
         yt = _shot_y(npz_dir, s)
         yp = preds[s]
         if yp.shape != yt.shape:
-            continue                                 # mis-aligned; skip defensively
+            import sys
+            print(f"  [bench] shot {s}: pred {yp.shape} != truth {yt.shape}, skipped", file=sys.stderr)
+            continue
         yp_all.append(yp); yt_all.append(yt)
         per_shot.append(_per_shot_r2(yp, yt, y_train_mean))
         per_shot_ccc.append(ccc(yp, yt))

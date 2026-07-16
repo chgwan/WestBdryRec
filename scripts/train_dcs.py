@@ -111,9 +111,9 @@ def main():
             cfg["hp"][k]["epochs"] = args.epochs
     _, ncm = _meta_ncm(npz_dir)
     if args.shots is not None:
-        train = val = test = sorted(args.shots)
+        train = test = sorted(args.shots)
     else:
-        train, val, test = bench.load_filtered_split(npz_dir)
+        train, _val, test = bench.load_filtered_split(npz_dir)
 
     models = ["m0", "m1", "m2"] if args.model == "all" else [args.model]
     run_dir = CFG.trains_dir / cfg["run"]
