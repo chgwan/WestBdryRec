@@ -21,8 +21,8 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from torch.utils.data import DataLoader
 
 from . import bench
-from .dataset import engineer, FEATURE_ORDER
-from .dataset import keep_mask
+from .dataset import engineer, FEATURE_ORDER, keep_mask
+from .dataset import SnapshotDataset, SeqDataset
 from .dcs_features import load_dcs_config, load_meta, node_col_map, read_snapshot, read_series
 from .metrics import ccc
 from .models import ResMLP, ActSeqGRU
@@ -45,16 +45,24 @@ def _shot_xy(h5_dir, npz_dir, shot):
     return X[v], Y[v], ar[v], az[v]
 
 
-def train_save(h5_dir, npz_dir, out_path, hp):
+def train_save(h5_dir, npz_dir, out_path, hp, shots=None, max_per_shot=None):
     """Fit M0 (32 per-angle HistGBTs) + axis model (2 HistGBTs) on the train shots;
-    save joblib {m0, axis_r, axis_z, keep}; return a meta dict."""
-    train, _val, _test = bench.load_filtered_split(npz_dir)
+    save joblib {m0, axis_r, axis_z, keep}; return a meta dict.
+
+    ``shots=None`` uses the split's train shots; pass a list to override (smoke
+    tests). ``max_per_shot`` caps per-shot slices (seeded) when given."""
+    train = shots if shots is not None else bench.load_filtered_split(npz_dir)[0]
+    rng = np.random.default_rng(0)
     Xs, Ys, Ar, Az = [], [], [], []
     for s in train:
         g = _shot_xy(h5_dir, npz_dir, s)
         if g is None:
             continue
-        Xs.append(g[0]); Ys.append(g[1]); Ar.append(g[2]); Az.append(g[3])
+        X, Y, a, c = g
+        if max_per_shot and len(X) > max_per_shot:
+            idx = np.sort(rng.choice(len(X), max_per_shot, replace=False))
+            X, Y, a, c = X[idx], Y[idx], a[idx], c[idx]
+        Xs.append(X); Ys.append(Y); Ar.append(a); Az.append(c)
     Xtr, Ytr = np.concatenate(Xs), np.concatenate(Ys)
     ar, az = np.concatenate(Ar), np.concatenate(Az)
     keep = Xtr.std(0) > 0
@@ -232,6 +240,22 @@ def _dcs_series_mean_std(npz_dir, shots, cfg, ncm):
     return X.mean(0), X.std(0)
 
 
+def _gru_forward(model, A, mk):
+    """ActSeqGRU forward robust to cuDNN NOT_SUPPORTED on the long DCS series.
+
+    Ensures a contiguous input and, on a cuDNN RuntimeError (no kernel for the
+    ~40-58k-step sequence in this mode), retries with cuDNN disabled (native GRU)."""
+    A = A.contiguous()
+    try:
+        return model(A, mk)
+    except RuntimeError:
+        prev = torch.backends.cudnn.enabled
+        torch.backends.cudnn.enabled = False
+        out = model(A, mk)
+        torch.backends.cudnn.enabled = prev
+        return out
+
+
 def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
     """Train ActSeqGRU on the DCS actuator series with masked MSE; val early-stop."""
     cfg = cfg or load_dcs_config()
@@ -254,7 +278,7 @@ def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
         for A, Y, m in DataLoader(ds_tr, batch_size=1, shuffle=True):
             A = A.to(_device()).float(); Y = Y.to(_device()).float()
             mk = m.to(_device()).bool()
-            pred = model(A, mk)
+            pred = _gru_forward(model, A, mk)
             w = mk.unsqueeze(-1).float()
             loss = (((pred - Y) ** 2) * w).sum() / w.sum().clamp(min=1.0)
             opt.zero_grad(); loss.backward(); opt.step()
@@ -263,7 +287,7 @@ def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
             for A, Y, m in DataLoader(ds_va, batch_size=1):
                 A = A.to(_device()).float(); Y = Y.to(_device()).float()
                 mk = m.to(_device()).bool()
-                pred = model(A, mk); w = mk.unsqueeze(-1).float()
+                pred = _gru_forward(model, A, mk); w = mk.unsqueeze(-1).float()
                 vl += float((((pred - Y) ** 2) * w).sum()); n += int(w.sum().item())
         vl = vl / max(n, 1)
         if vl < best - 1e-7:
@@ -397,3 +421,120 @@ def predict_dump_seq(model, h5_dir, npz_dir, shots, raw_names, mean, std, out_pa
         pred = model(At, mt)[0].cpu().numpy()
         preds[int(s)] = pred[m].astype(np.float32)
     save_predictions(out_path, preds)
+
+
+# ── IMAS T0 strict-actuator M1/M2 (reuse SnapshotDataset / SeqDataset) ──
+
+def _imas_snapshot_mean_std(h5_dir, npz_dir, shots):
+    """Per-feature ``(mean, std)`` over valid train slices via :func:`engineer`."""
+    feats = []
+    for s in shots:
+        f = pathlib.Path(h5_dir) / f"{int(s)}.h5"
+        if not f.exists():
+            continue
+        X, vf = engineer(f)
+        d = np.load(pathlib.Path(npz_dir) / f"{int(s)}.npz")
+        Y = d["Y"].astype(float)
+        v = (vf & d["valid"].astype(bool)
+             & np.isfinite(Y).all(1) & np.isfinite(X).all(1))
+        if v.any():
+            feats.append(X[v])
+    Xall = np.concatenate(feats)
+    return Xall.mean(0), Xall.std(0)
+
+
+def train_m1_imas(h5_dir, npz_dir, out_path, hp, shots=None, max_per_shot=None):
+    """Train ResMLP on the IMAS T0 snapshot; val early-stop; save torch state.
+
+    ``shots=None`` uses the split's train/val; pass a list to override (smoke)."""
+    if shots is None:
+        train, val, _ = bench.load_filtered_split(npz_dir)
+    else:
+        train, val = split_shots_3(list(shots))[:2]
+    mean, std = _imas_snapshot_mean_std(h5_dir, npz_dir, train)
+    ds_tr = SnapshotDataset(h5_dir, npz_dir, train, mean, std, max_per_shot)
+    ds_va = SnapshotDataset(h5_dir, npz_dir, val, mean, std, max_per_shot)
+    keep = ds_tr.keep
+    model = ResMLP(n_in=int(keep.sum()), hidden=hp["hidden"],
+                   depth=hp["depth"], dropout=hp["dropout"])
+    train_neural(model, DataLoader(ds_tr, batch_size=2048, shuffle=True),
+                 DataLoader(ds_va, batch_size=2048), epochs=hp["epochs"],
+                 lr=hp["lr"], patience=hp["patience"])
+    out_path = pathlib.Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state": model.state_dict(), "keep": keep, "hp": hp,
+                "n_in": int(keep.sum()), "mean": np.asarray(mean, float),
+                "std": np.asarray(std, float)}, out_path)
+    return {"best_val_mse": float(model.best_val_mse),
+            "stop_epoch": int(model.stop_epoch), "n_in": int(keep.sum())}
+
+
+def _imas_series_mean_std(h5_dir, npz_dir, shots, raw_names):
+    """Per-channel ``(mean, std)`` over valid steps of the raw actuator series."""
+    feats = []
+    for s in shots:
+        f = pathlib.Path(h5_dir) / f"{int(s)}.h5"
+        if not f.exists():
+            continue
+        with h5py.File(f, "r") as h:
+            t = np.asarray(h["time"], float)
+            cols = [np.asarray(h[nm], float).reshape(-1)
+                    if (nm in h and getattr(h[nm], "shape", None) is not None)
+                    else np.zeros(t.size) for nm in raw_names]
+            A = np.column_stack(cols)
+        d = np.load(pathlib.Path(npz_dir) / f"{int(s)}.npz")
+        Y = d["Y"].astype(float)
+        valid = d["valid"].astype(bool)
+        m = np.isfinite(A).all(1) & np.isfinite(Y).all(1) & valid
+        if m.any():
+            feats.append(A[m])
+    Xall = np.concatenate(feats)
+    return Xall.mean(0), Xall.std(0)
+
+
+def train_m2_imas(h5_dir, npz_dir, out_path, hp, raw_names, shots=None):
+    """Train ActSeqGRU on the IMAS T0 actuator series with masked MSE; val early-stop.
+
+    Each item is one whole shot ``(A(L,n_act), Y(L,32), mask(L,))``; invalid steps
+    are masked out of the loss. ``shots=None`` uses the split's train/val."""
+    if shots is None:
+        train, val, _ = bench.load_filtered_split(npz_dir)
+    else:
+        train, val = split_shots_3(list(shots))[:2]
+    mean, std = _imas_series_mean_std(h5_dir, npz_dir, train, raw_names)
+    ds_tr = SeqDataset(h5_dir, npz_dir, train, raw_names, mean, std)
+    ds_va = SeqDataset(h5_dir, npz_dir, val, raw_names, mean, std)
+    n_act = int(ds_tr.shots[0][0].shape[1]) if ds_tr.shots else len(raw_names)
+    model = ActSeqGRU(n_act=n_act, hidden=hp["hidden"], layers=hp["layers"],
+                      dropout=hp["dropout"]).to(_device())
+    opt = torch.optim.AdamW(model.parameters(), lr=hp["lr"], weight_decay=1e-5)
+    best, best_state, bad = 1e9, None, 0
+    for ep in range(hp["epochs"]):
+        model.train()
+        for A, Y, m in DataLoader(ds_tr, batch_size=1, shuffle=True):
+            A = A.to(_device()).float(); Y = Y.to(_device()).float()
+            mk = m.to(_device()).bool()
+            pred = _gru_forward(model, A, mk); w = mk.unsqueeze(-1).float()
+            loss = (((pred - Y) ** 2) * w).sum() / w.sum().clamp(min=1.0)
+            opt.zero_grad(); loss.backward(); opt.step()
+        model.eval(); vl, n = 0.0, 0
+        with torch.no_grad():
+            for A, Y, m in DataLoader(ds_va, batch_size=1):
+                A = A.to(_device()).float(); Y = Y.to(_device()).float()
+                mk = m.to(_device()).bool()
+                pred = _gru_forward(model, A, mk); w = mk.unsqueeze(-1).float()
+                vl += float((((pred - Y) ** 2) * w).sum()); n += int(w.sum().item())
+        vl = vl / max(n, 1)
+        if vl < best - 1e-7:
+            best, best_state, bad = vl, copy.deepcopy(model.state_dict()), 0
+        else:
+            bad += 1
+            if bad >= hp["patience"]:
+                break
+    if best_state:
+        model.load_state_dict(best_state)
+    out_path = pathlib.Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state": model.state_dict(), "n_act": n_act, "hp": hp,
+                "mean": np.asarray(mean, float), "std": np.asarray(std, float)}, out_path)
+    model.best_val_mse = float(best)
+    return {"best_val_mse": float(best), "n_act": n_act}

@@ -16,9 +16,13 @@ def load_filtered_split(npz_dir, val_frac=0.1, test_frac=0.1, seed=0):
     return split_shots_3(shots, val_frac, test_frac, seed)
 
 
-def _shot_y(npz_dir, shot):
+def _shot_y(npz_dir, shot, t_min=0.0):
+    """Per-shot target Y, restricted to ``t >= t_min`` (default 0 = plasma phase).
+
+    Matches the predict paths' plasma mask so pred/truth shapes agree in scoring.
+    """
     d = np.load(pathlib.Path(npz_dir) / f"{int(shot)}.npz")
-    v = d["valid"].astype(bool)
+    v = d["valid"].astype(bool) & (d["time"].astype(float) >= t_min)
     return d["Y"][v].astype(float)
 
 

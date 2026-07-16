@@ -53,7 +53,9 @@ def test_score_predictions_reports_ccc(tmp_path=None):
     yt = np.random.default_rng(2).normal(size=(6, 32))
     ytr = np.random.default_rng(3).normal(size=(10, 32))
     for i, arr in enumerate([yt, ytr], start=1):
-        np.savez(npz / f"{i}.npz", Y=arr.astype(np.float32), valid=np.ones(len(arr), dtype=bool))
+        np.savez(npz / f"{i}.npz", Y=arr.astype(np.float32),
+                 valid=np.ones(len(arr), dtype=bool),
+                 time=np.arange(len(arr), dtype=np.float32))  # t>=0 so plasma mask keeps all
     json.dump({"shots": [{"shot": 1}, {"shot": 2}]}, (npz / "meta.json").open("w"))
     pred_path = tmp_path / "pred.npz"
     save_predictions(pred_path, {1: yt.copy()})  # shot 1 = test

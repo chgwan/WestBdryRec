@@ -51,8 +51,11 @@ def _apply_nan(col, policy, essential_mask):
     return np.where(finite, col, 0.0), essential_mask & finite
 
 
-def read_snapshot(npz_path, cfg, ncm):
-    """(feats(nt, n_chan+4), mask(nt,)). Heating NaN->0; essential NaN->drop slice."""
+def read_snapshot(npz_path, cfg, ncm, t_min=0.0):
+    """(feats(nt, n_chan+4), mask(nt,)). Heating NaN->0; essential NaN->drop slice.
+
+    ``mask`` is restricted to ``t >= t_min`` (default 0 = plasma phase; pre-discharge
+    t<0 has no real LCFS and must be excluded from train/eval)."""
     d = np.load(npz_path)
     X = d["X"].astype(float); valid = d["valid"].astype(bool); t = d["time"].astype(float)
     chans = strict_channels(cfg)
@@ -69,13 +72,15 @@ def read_snapshot(npz_path, cfg, ncm):
     cum = np.concatenate([[0.0], np.cumsum(heat[:-1] * np.diff(t))])
     derived = np.column_stack([np.linalg.norm(pf, axis=1), heat, cum, t - t[0]])
     feats = np.column_stack([raw, derived]).astype(np.float32)
-    return feats, valid & essential
+    return feats, valid & essential & (t >= t_min)
 
 
-def read_series(npz_path, cfg, ncm):
-    """(A(nt, n_chan), mask(nt,)) — raw actuator series for the temporal model."""
+def read_series(npz_path, cfg, ncm, t_min=0.0):
+    """(A(nt, n_chan), mask(nt,)) — raw actuator series for the temporal model.
+
+    ``mask`` restricted to ``t >= t_min`` (default 0 = plasma phase)."""
     d = np.load(npz_path)
-    X = d["X"].astype(float); valid = d["valid"].astype(bool)
+    X = d["X"].astype(float); valid = d["valid"].astype(bool); t = d["time"].astype(float)
     chans = strict_channels(cfg)
     nt = X.shape[0]
     A = np.zeros((nt, len(chans)), np.float32)
@@ -83,4 +88,4 @@ def read_series(npz_path, cfg, ncm):
     for k, (node, _kind, policy) in enumerate(chans):
         col, essential = _apply_nan(X[:, ncm[node]], policy, essential)
         A[:, k] = col
-    return A, valid & essential
+    return A, valid & essential & (t >= t_min)
