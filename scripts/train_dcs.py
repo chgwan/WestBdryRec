@@ -79,10 +79,17 @@ def _pred_m2(art, npz_dir, shots, cfg, ncm, out):
             Y = np.load(p)["Y"].astype(float)
             v = mask & np.isfinite(Y).all(1)
             if v.any():
-                X = ((A - mean) / std)[None].astype(np.float32)
+                X = np.ascontiguousarray(((A - mean) / std)[None]).astype(np.float32)
                 mk = v[None]
-                pred = model(torch.from_numpy(X).to(_device()), torch.from_numpy(mk).to(_device()))[0].cpu().numpy()
-                preds[int(s)] = pred[v].astype(np.float32)
+                Xt = torch.from_numpy(X).to(_device())
+                mk_t = torch.from_numpy(mk).to(_device())
+                try:
+                    yhat = model(Xt, mk_t)
+                except RuntimeError:  # cuDNN has no eval-mode kernel for this long sequence
+                    torch.backends.cudnn.enabled = False
+                    yhat = model(Xt, mk_t)
+                    torch.backends.cudnn.enabled = True
+                preds[int(s)] = yhat[0].cpu().numpy()[v].astype(np.float32)
     save_predictions(out, preds)
 
 
