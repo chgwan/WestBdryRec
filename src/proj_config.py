@@ -44,9 +44,9 @@ class ProjConfig(BaseSettings):
         return self.proj_db_dir / "datasets" / "Npz"
 
     # --- IMAS-native LCFS sweep layout ---
-    # @property
+    @property
     def imas_h5_dir(self) -> pathlib.Path:
-        return self.proj_db_dir / "datasets" / "datasets"
+        return self.proj_db_dir / "datasets" / "IMASH5"
 
     @property
     def imas_npz_dir(self) -> pathlib.Path:
