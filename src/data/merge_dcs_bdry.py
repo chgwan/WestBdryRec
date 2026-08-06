@@ -41,12 +41,24 @@ def resample_to_grid(grid, ts, values):
     """Linearly interpolate ``values`` (sampled at ``ts``) onto ``grid``.
 
     ``values`` is 1-D ``(N,)`` or multi-channel ``(C, N)`` with time on the last
-    axis. Grid points outside ``[ts[0], ts[-1]]`` are set to NaN (no
-    extrapolation). ``ts`` must be ascending.
+    axis. Grid points outside the source span are set to NaN (no extrapolation).
+
+    ``ts`` is sorted and de-duplicated here rather than assumed ascending: 27 of the
+    759 selected shots carry a GMAG time axis with a single non-increasing sample
+    (sub-millisecond jitter), and ``np.interp`` requires a monotonic ``xp`` -- given a
+    non-monotonic one it returns silently wrong values instead of failing. That
+    corrupted the boundary for 5 shots before this guard existed.
     """
     grid = np.asarray(grid, float)
     ts = np.asarray(ts, float)
     values = np.asarray(values, float)
+    if np.any(np.diff(ts) <= 0):
+        order = np.argsort(ts, kind="stable")
+        ts = ts[order]
+        values = values[..., order]
+        uniq = np.r_[True, np.diff(ts) > 0]
+        ts = ts[uniq]
+        values = values[..., uniq]
     outside = (grid < ts[0]) | (grid > ts[-1])
     if values.ndim == 1:
         out = np.interp(grid, ts, values)
@@ -116,7 +128,7 @@ def read_dcs_mat(mat_path):
 
 def _merge_one(args):
     """Worker: build one resampled MergedH5/<shot>.h5. Returns (shot, ok, err)."""
-    shot, bnd_dir, dcs_dir, merged_dir = args
+    shot, bnd_dir, dcs_dir, merged_dir, time_base = args
     bnd_path = bnd_dir / f"{shot}.h5"
     dcs_path = dcs_dir / f"DCS_archive_{shot}.mat"
     out_path = merged_dir / f"{shot}.h5"
@@ -131,26 +143,56 @@ def _merge_one(args):
 
         with h5py.File(bnd_path, "r") as hf_bnd:
             gb_t = np.asarray(hf_bnd["targets/GMAG_BND_time"][:], float).reshape(-1)
-            lo, hi = float(gb_t.min()), float(gb_t.max())
-            win = np.where((dcs_time >= lo) & (dcs_time <= hi))[0]
-            if win.size < 2:
-                return shot, False, "empty DCS/GMAG_BND overlap"
-            w0, w1 = int(win[0]), int(win[-1])
-            grid = dcs_time[w0:w1 + 1]            # ignitron time, clipped to GMAG_BND span
+            if time_base == "gmag":
+                # The LCFS is what we predict, so it must never be interpolated: the
+                # grid IS the GMAG_BND reconstruction time, clipped to the DCS span so
+                # the scope interpolation never extrapolates. Every surviving slice is
+                # then a real reconstruction, which is also what makes the per-slice
+                # quality filters meaningful.
+                #
+                # This axis is NOT uniform: 2.048 ms (488 Hz) is only the modal step,
+                # and every shot contains longer gaps (up to ~33 ms) where the
+                # reconstruction dropped out. A few shots additionally carry a single
+                # non-increasing sample (sub-ms jitter). Time must be strictly
+                # increasing -- np.interp's xp requires it, and np.diff(t) feeds
+                # cumulative features -- so keep a strictly increasing subsequence
+                # rather than a contiguous slice.
+                inwin = np.where((gb_t >= dcs_time.min()) & (gb_t <= dcs_time.max()))[0]
+                if inwin.size < 2:
+                    return shot, False, "empty DCS/GMAG_BND overlap"
+                span = np.arange(int(inwin[0]), int(inwin[-1]) + 1)
+                t_span = gb_t[span]
+                strict = np.r_[True, np.diff(t_span) > 0]
+                sel = span[strict]
+                if sel.size < 2:
+                    return shot, False, "GMAG_BND time axis not increasing"
+                grid = gb_t[sel]
+            elif time_base == "dcs":
+                lo, hi = float(gb_t.min()), float(gb_t.max())
+                win = np.where((dcs_time >= lo) & (dcs_time <= hi))[0]
+                if win.size < 2:
+                    return shot, False, "empty DCS/GMAG_BND overlap"
+                grid = dcs_time[int(win[0]):int(win[-1]) + 1]
+            else:
+                return shot, False, f"unknown time_base {time_base!r}"
 
             with h5py.File(out_path, "w") as hf_out:
                 for ak, av in hf_bnd.attrs.items():
                     hf_out.attrs[ak] = av
                 hf_out.attrs["time_base"] = "ignitron"
+                hf_out.attrs["grid_source"] = time_base
                 hf_out.attrs["grid_n"] = grid.size
                 hf_out.create_dataset("time", data=grid)
 
-                # DCS scopes: native, sliced to the window (shared Ip_scope grid)
+                # DCS scopes: resampled onto the grid (identity when time_base='dcs',
+                # since the grid is then a contiguous slice of the scope's own axis)
                 dcs_grp = hf_out.create_group("dcs")
                 for scope, (ref, act) in scopes.items():
                     g = dcs_grp.create_group(scope)
-                    g.create_dataset("ref", data=ref[w0:w1 + 1])
-                    g.create_dataset("actual", data=act[w0:w1 + 1])
+                    two = resample_to_grid(grid, dcs_time,
+                                           np.stack([ref, act], axis=0))
+                    g.create_dataset("ref", data=two[0])
+                    g.create_dataset("actual", data=two[1])
 
                 # GMAG inputs/targets: resampled onto the grid
                 for grp_name in ("inputs", "targets"):
@@ -176,7 +218,14 @@ def _merge_one(args):
 
 
 def run(bnd_dir=None, dcs_dir=None, merged_dir=None, status_csv=None,
-        flat_top_csv=None, workers=1):
+        flat_top_csv=None, workers=1, time_base="gmag"):
+    """Build MergedH5 for every selected shot.
+
+    ``time_base='gmag'`` (default) makes the shared grid the native 488 Hz
+    ``GMAG_BND_time``, so the LCFS target is never interpolated and every slice is a
+    real reconstruction. ``'dcs'`` reproduces the historical ~1 kHz DCS grid, which
+    interpolated the boundary -- kept only to regenerate the old baseline.
+    """
     cfg = get_proj_config()
     bnd_dir = pathlib.Path(bnd_dir) if bnd_dir else cfg.gmagh5_dir
     dcs_dir = pathlib.Path(dcs_dir) if dcs_dir else cfg.dcsheating_dir
@@ -187,16 +236,18 @@ def run(bnd_dir=None, dcs_dir=None, merged_dir=None, status_csv=None,
 
     sel = load_selected_shots(status_csv, flat_top_csv, cfg.flat_top_min_s)
     print(f"selected shots: {len(sel)}")
-    print(f"  DCS .mat : {dcs_dir}")
-    print(f"  boundary : {bnd_dir}")
-    print(f"  output   : {merged_dir}")
+    print(f"  DCS .mat  : {dcs_dir}")
+    print(f"  boundary  : {bnd_dir}")
+    print(f"  output    : {merged_dir}")
+    print(f"  time base : {time_base} "
+          f"({'GMAG_BND native, target not interpolated' if time_base == 'gmag' else 'DCS grid, boundary interpolated'})")
 
     # regenerate the dataset (new format incompatible with the old Merged files)
     if merged_dir.exists():
         shutil.rmtree(merged_dir)
     merged_dir.mkdir(parents=True, exist_ok=True)
 
-    items = [(s, bnd_dir, dcs_dir, merged_dir) for s in sel]
+    items = [(s, bnd_dir, dcs_dir, merged_dir, time_base) for s in sel]
     results = pmap(_merge_one, items, workers, "merging")
 
     ok = sum(1 for _, success, _ in results if success)

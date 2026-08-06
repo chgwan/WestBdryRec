@@ -39,6 +39,19 @@ class ProjConfig(BaseSettings):
     def mergednpz_dir(self) -> pathlib.Path:
         return self.proj_db_dir / "datasets" / "MergedNpz"
 
+    # --- newTrain rebuild: GMAG_BND-native time base + per-slice quality filters ---
+    # Kept as separate dirs so the pre-filter NpzOrigin dataset stays available as
+    # the baseline the retrain is scored against.
+    @property
+    def mergedh5_gmag_dir(self) -> pathlib.Path:
+        """MergedH5 built on the native 488 Hz GMAG_BND grid (target not interpolated)."""
+        return self.proj_db_dir / "datasets" / "MergedH5Gmag"
+
+    @property
+    def npzgeom_dir(self) -> pathlib.Path:
+        """NPZ with S0-S5 filters, per-slice GMAG_GEOM polar origin and time PE."""
+        return self.proj_db_dir / "datasets" / "NpzGeom"
+
     @property
     def npz_dir(self) -> pathlib.Path:
         return self.proj_db_dir / "datasets" / "Npz"

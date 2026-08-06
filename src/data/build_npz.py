@@ -2,11 +2,25 @@
 """Build per-shot NPZ arrays for polar-r(theta) LCFS prediction.
 
 Reads each time-aligned ``MergedH5/<shot>.h5`` and writes ``ProjDB/datasets/MergedNpz/<shot>.npz``
-with the input feature matrix ``X``, the polar target ``Y = r(theta)`` about the
-fixed origin ``(2.5, 0)``, the raw boundary ``bnd_RZ`` (R,Z), the ``time`` vector
-and a ``valid`` mask, trimmed to the discharge window. A shared ``meta.json``
-records the input layout, dimensions, per-shot slice counts and dataset-wide
-normalization stats (per-feature X mean/std, per-angle Y mean/std).
+with the input feature matrix ``X``, the polar target ``Y = r(theta)``, the raw
+boundary ``bnd_RZ`` (R,Z), the ``time`` vector and a ``valid`` mask, trimmed to the
+span of slices that survive the quality filters. A shared ``meta.json`` records the
+input layout, dimensions, per-shot slice counts, the filter criteria and thresholds
+in force, and dataset-wide normalization stats (per-feature X mean/std, per-angle Y
+mean/std).
+
+**The polar origin is per slice**, namely that slice's plasma geometric center
+``(Rgeom, Zgeom)`` from ``inputs/GMAG_GEOM``, stored in the ``center`` array -- not
+the fixed ``(2.5, 0)`` this module used previously. The filters in
+:mod:`src.data.filter` establish enclosure and star-shapedness about that same
+center, which is exactly the precondition ``radii_on_grid`` needs; a fixed origin
+cannot satisfy it for boundaries that do not contain the origin. Consequence:
+``Y`` alone no longer determines the absolute boundary -- reconstructing (R,Z)
+needs ``center`` too (see ``src/ml/axis_frame.reconstruct_absolute``).
+
+Per-slice filter verdicts travel with the data: ``fail`` (first failing criterion,
+0 = kept), ``only`` (criterion that rejects it alone) and ``flags`` (order-free
+per-criterion pass bits).
 
 Inputs come from ``configs/base.yml`` (``data.input_list``): the actuator/
 diagnostic scope traces (PF/CS coils, heating power+phase, Ip reference, line
@@ -26,10 +40,15 @@ import yaml
 
 from ..proj_config import get_proj_config
 from ..utils import pmap
+from .filter import DEFAULTS as FILTER_DEFAULTS
+from .filter import REGISTRY as FILTER_REGISTRY
+from .filter import SliceQuality
 
 N_POINTS = 32          # native LCFS vertices per slice
-ORIGIN = (2.5, 0.0)    # fixed polar origin (m): WEST nominal major radius / midplane
 N_ANGLES = 32          # fixed uniform angle grid size
+# There is deliberately no fixed polar origin here. Y is projected about each slice's own
+# (Rgeom, Zgeom); a module-level constant origin would only invite a caller to reuse it and
+# reintroduce the multi-valued-r(theta) bug it used to cause. See docs/lcfs_filters.md.
 
 # Equilibrium scalar LABELS for the guided model: (name, h5 node, channel, scale).
 # Used ONLY as training targets -- never an inference input. Channels/scale per
@@ -88,8 +107,13 @@ def radii_on_grid(R, Z, origin, theta_grid):
 
     ``R``, ``Z`` are the native vertices (m). Returns ``r`` at each ``theta_grid``
     angle, where ``theta`` is measured from ``origin`` (theta=0 outboard, CCW).
-    Vertices are angularly monotonic about the chosen origin (verified), so the
-    periodic interpolation is single-valued.
+
+    **Precondition:** the vertices must be angularly monotonic about ``origin``, i.e.
+    the boundary must be star-shaped about it. This is *not* automatic -- it fails for
+    roughly a third of raw GMagH5 slices -- and when it fails ``argsort`` silently
+    reorders the vertices and the result is a boundary that never existed. Criteria
+    S3/S4 in :mod:`src.data.filter` are what establish it; call this only on slices
+    that pass them, with ``origin`` the same center those criteria were judged about.
     """
     R0, Z0 = origin
     th = np.arctan2(Z - Z0, R - R0) % (2 * np.pi)
@@ -98,12 +122,76 @@ def radii_on_grid(R, Z, origin, theta_grid):
     return periodic_interp(theta_grid, th[o], r[o])
 
 
-def discharge_window(bnd):
-    """First/last column index where the LCFS is physically valid.
+PE_BASE = 5.0          # replaces the transformer's 10000: shots are seconds, not tokens
+PE_PAIRS = 5           # sin/cos pairs -> 2 * PE_PAIRS feature columns
 
-    ``bnd`` is ``(64, nt)`` interleaved ``[R0,Z0,...,R31,Z31]``. A slice is valid
-    when finite, non-zero, R in (1.8, 3.3), R-span > 0.3 m and |Z| < 1.2 m.
-    Returns the inclusive ``(i0, i1)`` span of valid slices, or ``None``.
+
+def time_encoding(t, pairs=PE_PAIRS, base=PE_BASE):
+    """Sinusoidal positional encoding of ignitron **time in seconds**.
+
+    ``PE[:, 2i] = sin(t / base**(2i/d))``, ``PE[:, 2i+1] = cos(...)`` for
+    ``i = 0..pairs-1``. Returns ``(nt, 2 * pairs)``.
+
+    ``d = 2 * pairs`` is the width of the PE block itself, playing the role of the
+    transformer's ``d_model`` -- the convention where the encoding fills the whole
+    embedding. It is a choice, not a given: the PE here is 10 columns appended to a
+    22-column feature vector, so there is no embedding of width 10 to point at. It is
+    also the choice that spreads the frequencies. With ``d = 2 * pairs`` the exponent
+    reaches 0.8 and the periods span 6.3 -> 22.8 s; using the full 32-column feature
+    width instead would cap the exponent at 0.25 and squeeze all five periods into
+    6.3 -> 9.4 s, i.e. five near-duplicates.
+
+    ``base=5`` rather than the usual 10000 because the positions here are physical
+    seconds over a ~10-70 s discharge, not token indices over thousands of steps.
+    Both sin and cos are emitted so the phase is unambiguous -- sin alone cannot
+    distinguish a rising from a falling instant.
+    """
+    t = np.asarray(t, float).reshape(-1)
+    d = 2 * pairs
+    i = np.arange(pairs)
+    denom = base ** (2 * i / d)                      # (pairs,)
+    ang = t[:, None] / denom[None, :]                # (nt, pairs)
+    out = np.empty((t.size, d), np.float32)
+    out[:, 0::2] = np.sin(ang)
+    out[:, 1::2] = np.cos(ang)
+    return out
+
+
+def time_encoding_names(pairs=PE_PAIRS, base=PE_BASE):
+    """Column names for :func:`time_encoding`, in the same order."""
+    names = []
+    for k in range(pairs):
+        period = 2 * np.pi * base ** (2 * k / (2 * pairs))
+        names += [f"pe_sin_{k}_T{period:.1f}s", f"pe_cos_{k}_T{period:.1f}s"]
+    return names
+
+
+def read_center(hf, nt):
+    """``(2, nt)`` plasma geometric center ``(Rgeom, Zgeom)`` in **metres**.
+
+    ``inputs/GMAG_GEOM`` is ``(16, nt)`` with channels ``[0, 1]`` = (Rgeom, Zgeom) in
+    millimetres. Absent or misshaped -> all-NaN, which fails criterion S3 for every
+    slice rather than silently substituting a default center.
+    """
+    center = np.full((2, nt), np.nan)
+    if "inputs/GMAG_GEOM" in hf:
+        gm = hf["inputs/GMAG_GEOM"]
+        if (getattr(gm, "shape", None) is not None and gm.ndim == 2
+                and gm.shape[0] >= 2 and gm.shape[1] == nt):
+            center = np.asarray(gm, float)[:2] * 1e-3
+    return center
+
+
+def discharge_window(bnd):
+    """First/last column index where the LCFS is physically plausible.
+
+    ``bnd`` is ``(64, nt)`` interleaved ``[R0,Z0,...,R31,Z31]``. A slice counts when
+    finite, non-zero, R in (1.8, 3.3), R-span > 0.3 m and |Z| < 1.2 m. Returns the
+    inclusive ``(i0, i1)`` span, or ``None``.
+
+    Superseded for dataset building by the criteria in :mod:`src.data.filter` (this
+    bounding box accepts boundaries up to 1 cm outside the real vessel); retained
+    because ``src/data/sweep_inputs.py`` still windows with it.
     """
     nt = bnd.shape[1]
     g = bnd.reshape(N_POINTS, 2, nt)              # [point, (R,Z), time]
@@ -116,6 +204,20 @@ def discharge_window(bnd):
               & (R.min(0) > 1.8) & (R.max(0) < 3.3)
               & ((R.max(0) - R.min(0)) > 0.3) & (np.abs(Z).max(0) < 1.2))
     idx = np.where(ok)[0]
+    if idx.size == 0:
+        return None
+    return int(idx[0]), int(idx[-1])
+
+
+def keep_span(keep):
+    """Inclusive ``(i0, i1)`` span covering every kept slice, or ``None``.
+
+    Trimming to this span keeps the stored arrays small and preserves the historical
+    behaviour that ``time`` starts at the equilibrium start rather than at t=0.
+    Slices *inside* the span that fail the filters stay in the arrays but are marked
+    invalid, so the time base stays uniform for sequence models.
+    """
+    idx = np.where(np.asarray(keep, bool))[0]
     if idx.size == 0:
         return None
     return int(idx[0]), int(idx[-1])
@@ -217,40 +319,59 @@ def theta_grid(n_angles=N_ANGLES):
 
 def _build_one(args):
     """Worker: build one ProjDB/Npz/<shot>.npz. Returns (shot, ok, payload|err)."""
-    shot, merged_dir, npz_dir, channels, origin, theta = args
+    shot, merged_dir, npz_dir, channels, theta = args
     src = pathlib.Path(merged_dir) / f"{shot}.h5"
     out = pathlib.Path(npz_dir) / f"{shot}.npz"
     try:
         with h5py.File(src, "r") as hf:
             bnd = np.asarray(hf["targets/GMAG_BND"][:], float)      # (64, N)
-            win = discharge_window(bnd)
+            t_all = np.asarray(hf["time"], float).reshape(-1)
+            center_all = read_center(hf, bnd.shape[1])
+
+            # --- per-slice quality filters (src/data/filter.py) --------------------
+            # Evaluated over the whole record, then trimmed to the span of survivors.
+            q = SliceQuality(bnd, center_all, t_all)
+            win = keep_span(q.keep)
             if win is None:
-                return shot, False, "no discharge window"
+                return shot, False, "no slice passes the quality filters"
             i0, i1 = win
-            time = np.asarray(hf["time"][i0:i1 + 1], float)
+            keep = q.keep[i0:i1 + 1]
+            fail = q.fail_code()[i0:i1 + 1]
+            only = q.only_code()[i0:i1 + 1]
+            flags = q.flags()[i0:i1 + 1]
+            center = center_all[:, i0:i1 + 1]
+            time = t_all[i0:i1 + 1]
             nt = time.size
 
-            # X: one column per input channel (1-D scope trace on the shared grid).
+            # X: one column per input channel (1-D scope trace on the shared grid),
+            # then the time positional encoding appended on the right.
             # Absent / short channels are kept as NaN (faithful); nothing is imputed.
-            F = len(channels)
+            n_ch = len(channels)
+            F = n_ch + 2 * PE_PAIRS
             X = np.full((nt, F), np.nan, np.float32)
             for k, (_inp, ds_path, _node) in enumerate(channels):
                 ch = _read_channel(hf, ds_path, i0, i1)
                 if ch is not None and ch.shape == (nt,):
                     X[:, k] = ch.astype(np.float32)
+            X[:, n_ch:] = time_encoding(time)
 
             g = bnd[:, i0:i1 + 1].reshape(N_POINTS, 2, nt)          # [pt,(R,Z),t]
             R = g[:, 0, :]
             Z = g[:, 1, :]
-            Y = np.empty((nt, theta.size), np.float32)
-            for t in range(nt):
-                Y[t] = radii_on_grid(R[:, t], Z[:, t], origin, theta)
+            # Y = r(theta) about each slice's OWN center (Rgeom, Zgeom). The filters
+            # judge enclosure and star-shapedness about that same point, so the
+            # projection's precondition holds exactly where ``keep`` is true -- and
+            # only there, hence the NaN elsewhere rather than a fabricated profile.
+            Y = np.full((nt, theta.size), np.nan, np.float32)
+            for t in np.where(keep)[0]:
+                Y[t] = radii_on_grid(R[:, t], Z[:, t],
+                                     (center[0, t], center[1, t]), theta)
             bnd_RZ = np.transpose(g, (2, 0, 1)).astype(np.float32)  # (nt,32,2)
 
-            # Keep every slice except those with no usable data at all (X and Y both
-            # fully NaN). Faithful NaN in individual channels is preserved for
-            # downstream to filter -- it is not a reason to drop a slice here.
-            valid = ~(~np.isfinite(X).any(axis=1) & ~np.isfinite(Y).any(axis=1))
+            # A slice is usable when it passes every filter. Faithful NaN in
+            # individual X channels is preserved for downstream to handle -- it is
+            # not a reason to drop a slice here.
+            valid = keep & np.isfinite(Y).all(axis=1)
             if not valid.any():
                 return shot, False, "zero valid slices"
 
@@ -266,10 +387,14 @@ def _build_one(args):
             fin_X = np.isfinite(Xv)
 
             np.savez(out, X=X.astype(np.float32), Y=Y, S=S, bnd_RZ=bnd_RZ,
-                     time=time.astype(np.float32), valid=valid)
+                     time=time.astype(np.float32), valid=valid,
+                     center=center.T.astype(np.float32),   # (nt, 2) polar origin per slice
+                     fail=fail, only=only, flags=flags)
         return shot, True, {
             "shot": int(shot), "n_slices": int(nt),
             "t_start": float(time[0]), "t_end": float(time[-1]),
+            "reject": {c.code: int(np.sum(q.first_failure() == c.code))
+                       for c in FILTER_REGISTRY},
             "X_sum": np.where(fin_X, Xv, 0.0).sum(0),
             "X_sumsq": np.where(fin_X, Xv * Xv, 0.0).sum(0),
             "X_cnt": fin_X.sum(axis=0),
@@ -285,7 +410,7 @@ def _build_one(args):
 
 
 def run(merged_dir=None, npz_dir=None, config_path=None,
-        origin=ORIGIN, n_angles=N_ANGLES, workers=1):
+        n_angles=N_ANGLES, workers=1):
     """Build ProjDB/Npz/<shot>.npz for every Merged shot + write meta.json.
 
     Inputs come from ``configs/base.yml`` (``data.input_list`` -> actuator/
@@ -298,9 +423,15 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
     target_node = "GMAG_BND"
 
     node_map = build_node_map(config_path)
-    channels, layout, F = input_layout(node_map)
+    channels, layout, n_ch = input_layout(node_map)
+    # the time positional encoding occupies the columns after the scope channels
+    pe_names = time_encoding_names()
+    layout = layout + [{"input_name": "time_pe", "channels": len(pe_names),
+                        "cols": [n_ch, n_ch + len(pe_names)],
+                        "nodes": pe_names, "unit": ""}]
+    F = n_ch + len(pe_names)
     theta = theta_grid(n_angles)
-    print(f"inputs ({F} channels): "
+    print(f"inputs ({F} channels = {n_ch} scope + {len(pe_names)} time-PE): "
           + ", ".join(f"{k}={len(v)}" for k, v in node_map.items()))
 
     if npz_dir.exists():
@@ -308,7 +439,7 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
     npz_dir.mkdir(parents=True, exist_ok=True)
 
     shots = sorted(int(p.stem) for p in merged_dir.glob("*.h5"))
-    items = [(s, merged_dir, npz_dir, channels, tuple(origin), theta)
+    items = [(s, merged_dir, npz_dir, channels, theta)
              for s in shots]
     results = pmap(_build_one, items, workers, "build_npz")
 
@@ -324,15 +455,33 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
             else {"X_mean": [], "X_std": [], "Y_mean": [], "Y_std": [],
                   "n_valid": 0})
 
+    reject = {c.code: sum(d["reject"][c.code] for d in ok) for c in FILTER_REGISTRY}
     meta = {
-        "origin": list(origin),
+        # Y is r(theta) about each slice's own (Rgeom, Zgeom). There is no fixed
+        # origin in this pipeline; a reader keying on a constant would be wrong.
+        "origin": "per_slice_gmag_geom",
         "theta_deg": list(np.degrees(theta)),
         "target": {"node": target_node, "repr": "polar_r_theta",
-                   "n_angles": n_angles, "unit": "m"},
+                   "n_angles": n_angles, "unit": "m",
+                   "center": "per-slice, stored in the 'center' array"},
+        "filters": {
+            "module": "src.data.filter",
+            "criteria": [{"code": c.code, "title": c.title, "detail": c.detail,
+                          "requires": list(c.requires)} for c in FILTER_REGISTRY],
+            "thresholds": dict(FILTER_DEFAULTS),
+            "rejected_by_first_failure": reject,
+            "note": ("'fail'/'only' arrays are 1-based criterion indices (0 = kept); "
+                     "'flags' bit i set = criterion i passes, order-free"),
+        },
         "inputs": layout,
         "n_features": F,
+        "time_pe": {"pairs": PE_PAIRS, "base": PE_BASE, "pos": "ignitron time [s]",
+                    "formula": "PE[:,2i]=sin(t/base**(2i/(2*pairs))), 2i+1=cos(...)",
+                    "columns": pe_names},
         "arrays": {"X": ["nt", F], "Y": ["nt", n_angles], "S": ["nt", N_SCALARS],
-                   "bnd_RZ": ["nt", 32, 2], "time": ["nt"], "valid": ["nt"]},
+                   "bnd_RZ": ["nt", 32, 2], "time": ["nt"], "valid": ["nt"],
+                   "center": ["nt", 2], "fail": ["nt"], "only": ["nt"],
+                   "flags": ["nt"]},
         "norm": {"X_mean": np.asarray(norm["X_mean"]).tolist(),
                  "X_std": np.asarray(norm["X_std"]).tolist(),
                  "Y_mean": np.asarray(norm["Y_mean"]).tolist(),
