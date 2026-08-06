@@ -60,6 +60,12 @@ SCALAR_NODES = [
 ]
 N_SCALARS = len(SCALAR_NODES)
 
+# A grid point whose bracketing native reconstructions are farther apart than this
+# was interpolated across a dropout rather than within the normal 2.048 ms cadence.
+# 1.5x the modal step: wide enough not to flag ordinary jitter, tight enough to
+# catch every real gap. Only a census threshold -- validity is S0-S5's alone.
+FAB_GAP_MS = 3.072
+
 
 def _read_scalar(hf, node, ch, i0, i1):
     """Channel ``ch`` of a multi-channel GMAG signal, windowed ``[i0:i1+1]``.
@@ -343,6 +349,25 @@ def _build_one(args):
             time = t_all[i0:i1 + 1]
             nt = time.size
 
+            # V2 (uniform lattice) ships per-slice interpolation provenance. Absent
+            # from the NpzOrigin/NpzGeom merges, so this stays optional.
+            gap = None
+            if "src_gap_ms" in hf:
+                g_all = np.asarray(hf["src_gap_ms"], float).reshape(-1)
+                if g_all.size == bnd.shape[1]:
+                    gap = g_all[i0:i1 + 1].astype(np.float32)
+            # Captured here while the file is open; the return payload below runs
+            # after the ``with`` closes, so hf.attrs cannot be read there.
+            grid = (None if "grid_source" not in hf.attrs else {
+                "source": str(hf.attrs["grid_source"]),
+                "hz": float(hf.attrs.get("grid_hz", float("nan"))),
+                "dt_ms": 1e3 * float(hf.attrs.get("grid_dt", float("nan"))),
+                "clip_gap_ms": float(hf.attrs.get("clip_gap_ms", float("nan"))),
+                "k0": int(hf.attrs.get("grid_k0", 0)),
+                "clip_dropped_n": int(hf.attrs.get("clip_dropped_n", 0)),
+                "clip_dropped_s": float(hf.attrs.get("clip_dropped_s", 0.0)),
+            })
+
             # X: one column per input channel (1-D scope trace on the shared grid),
             # then the time positional encoding appended on the right.
             # Absent / short channels are kept as NaN (faithful); nothing is imputed.
@@ -386,10 +411,11 @@ def _build_one(args):
             Sv = S[s_valid].astype(np.float64)
             fin_X = np.isfinite(Xv)
 
+            extra = {} if gap is None else {"src_gap_ms": gap}
             np.savez(out, X=X.astype(np.float32), Y=Y, S=S, bnd_RZ=bnd_RZ,
                      time=time.astype(np.float32), valid=valid,
                      center=center.T.astype(np.float32),   # (nt, 2) polar origin per slice
-                     fail=fail, only=only, flags=flags)
+                     fail=fail, only=only, flags=flags, **extra)
         return shot, True, {
             "shot": int(shot), "n_slices": int(nt),
             "t_start": float(time[0]), "t_end": float(time[-1]),
@@ -400,6 +426,9 @@ def _build_one(args):
             "X_cnt": fin_X.sum(axis=0),
             "Y_sum": Yv.sum(0), "Y_sumsq": (Yv * Yv).sum(0),
             "n_valid": int(valid.sum()),
+            "n_fabricated": (0 if gap is None
+                             else int((valid & (gap > FAB_GAP_MS)).sum())),
+            "grid": grid,
             "S_sum": Sv.sum(0), "S_sumsq": (Sv * Sv).sum(0),
             "n_scalar_valid": int(s_valid.sum()),
         }
@@ -491,6 +520,23 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
         "n_shots": len(ok),
         "total_slices": int(sum(d["n_slices"] for d in ok)),
     }
+    grids = [d["grid"] for d in ok if d.get("grid")]
+    if grids:
+        meta["grid"] = {
+            "source": sorted({g["source"] for g in grids}),
+            "hz": sorted({g["hz"] for g in grids}),
+            "dt_ms": sorted({round(g["dt_ms"], 6) for g in grids}),
+            "clip_gap_ms": sorted({g["clip_gap_ms"] for g in grids}),
+            "clip_dropped_n_total": int(sum(g["clip_dropped_n"] for g in grids)),
+            "clip_dropped_s_total": float(sum(g["clip_dropped_s"] for g in grids)),
+            "k0_per_shot": {str(d["shot"]): d["grid"]["k0"]
+                            for d in ok if d.get("grid")},
+            # spec C5: the measured cost of filtering interpolated geometry
+            "fabricated_valid_slices": int(sum(d.get("n_fabricated", 0) for d in ok)),
+            "fabricated_gap_threshold_ms": FAB_GAP_MS,
+        }
+    if any("src_gap_ms" in np.load(npz_dir / f"{d['shot']}.npz").files for d in ok[:1]):
+        meta["arrays"]["src_gap_ms"] = ["nt"]
     if "S_mean" in norm:
         meta["norm"]["S_mean"] = np.asarray(norm["S_mean"]).tolist()
         meta["norm"]["S_std"] = np.asarray(norm["S_std"]).tolist()
