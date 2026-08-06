@@ -29,19 +29,26 @@ def test_target_is_34_wide_and_centre_is_absolute():
         assert 2.0 < np.nanmedian(T[finite, 32]) < 3.0, "Rgeom must be absolute metres"
 
 
-def test_truth_roundtrip_sets_the_absolute_metric_floor():
-    """reconstruct_absolute on the TRUTH columns vs bnd_RZ -- the floor a model cannot beat."""
+def test_truth_reconstruction_is_well_formed():
+    """Truth boundary rebuilt from (centre, rho) on the uniform theta grid.
+
+    There is no longer a representation floor to probe: the absolute metric
+    compares pred-vs-truth reconstructions that are BOTH built on the uniform
+    grid, i.e. like-for-like. The former round-trip-against-bnd_RZ check
+    compared a uniform-grid reconstruction against native-angle raw vertices
+    and was the bug itself, so it is retired. This test just guards against
+    garbled truth columns (NaNs, wrong units) by checking the reconstruction
+    is finite and inside the WEST vessel envelope.
+    """
     theta = np.deg2rad(np.asarray(load_meta(CFG.npzgeom_dir)["theta_deg"], float))
-    worst = 0.0
     for s in _some_shots(4):
         d = np.load(CFG.npzgeom_dir / f"{s}.npz")
         T, finite = load_target(CFG.npzgeom_dir / f"{s}.npz")
         v = finite & d["valid"].astype(bool)
         R, Z = reconstruct_absolute(T[v, 32], T[v, 33], T[v, :32], theta)
-        err = np.hypot(R - d["bnd_RZ"][v, :, 0], Z - d["bnd_RZ"][v, :, 1])
-        worst = max(worst, float(np.percentile(err, 99)) * 1000.0)
-    print(f"\nabsolute-boundary floor (truth round-trip, p99): {worst:.2f} mm")
-    assert worst < 20.0, "a >2 cm floor would mean the representation, not the model, is wrong"
+        assert np.isfinite(R).all() and np.isfinite(Z).all(), f"shot {s}: non-finite truth recon"
+        assert 1.8 < R.min() and R.max() < 3.3, f"shot {s}: R outside vessel envelope"
+        assert np.abs(Z).max() < 1.2, f"shot {s}: |Z| outside vessel envelope"
 
 
 def test_pe_channels_resolve_for_the_headline_config():

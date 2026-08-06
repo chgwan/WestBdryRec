@@ -21,12 +21,12 @@ from .target import N_OUT, N_RHO, load_target, split_outputs
 
 
 def _truth(npz_dir, shot, t_min=0.0):
-    """``(T (n,34), bnd_RZ (n,32,2))`` over the rows the predict paths kept."""
+    """``T (n,34)`` over the rows the predict paths kept."""
     p = pathlib.Path(npz_dir) / f"{int(shot)}.npz"
     d = np.load(p)
     T, finite = load_target(p)
     v = finite & d["valid"].astype(bool) & (d["time"].astype(float) >= t_min)
-    return T[v], d["bnd_RZ"][v].astype(float)
+    return T[v]
 
 
 def score_dcs34(pred_path, npz_dir, train_shots, test_shots, theta):
@@ -36,7 +36,7 @@ def score_dcs34(pred_path, npz_dir, train_shots, test_shots, theta):
         if np.asarray(yp).shape[-1] != N_OUT:
             raise ValueError(f"shot {s}: predictions are {np.asarray(yp).shape[-1]} wide, "
                              f"expected {N_OUT}")
-    rho_tr = np.concatenate([_truth(npz_dir, s)[0][:, :N_RHO] for s in train_shots])
+    rho_tr = np.concatenate([_truth(npz_dir, s)[:, :N_RHO] for s in train_shots])
     y_train_mean = rho_tr.mean(axis=0)
 
     rp, rt, cp, ct, ap, at = [], [], [], [], [], []
@@ -45,7 +45,7 @@ def score_dcs34(pred_path, npz_dir, train_shots, test_shots, theta):
         s = int(s)
         if s not in preds:
             continue
-        T, bnd = _truth(npz_dir, s)
+        T = _truth(npz_dir, s)
         P = np.asarray(preds[s], float)
         if P.shape[0] != T.shape[0]:
             raise ValueError(f"shot {s}: {P.shape[0]} predicted rows vs {T.shape[0]} truth "
@@ -55,8 +55,14 @@ def score_dcs34(pred_path, npz_dir, train_shots, test_shots, theta):
         rp.append(pr); rt.append(tr_)
         cp.append(pc); ct.append(tc)
         per_shot_ccc.append(ccc(pr, tr_))
+        # Absolute boundary: rebuild BOTH pred and truth on the uniform theta grid.
+        # Raw bnd_RZ lives at native (irregular) vertex angles, so pairing a
+        # uniform-grid prediction against it is a category error -- the model
+        # predicts resampled rho and cannot reproduce native-angle detail. The
+        # honest metric compares like-for-like reconstructions.
         Rp, Zp = reconstruct_absolute(pc[:, 0], pc[:, 1], pr, theta)
-        ap.append(np.stack([Rp, Zp], axis=-1)); at.append(bnd)
+        Rt, Zt = reconstruct_absolute(tc[:, 0], tc[:, 1], tr_, theta)
+        ap.append(np.stack([Rp, Zp], axis=-1)); at.append(np.stack([Rt, Zt], axis=-1))
     if not rp:
         raise ValueError("no test shot had predictions -- nothing was scored")
 

@@ -43,9 +43,9 @@ def test_perfect_prediction_scores_perfectly(tmp_path):
     assert m["n_shots"] == len(shots)
     assert m["ccc"] > 0.999 and m["r2"] > 0.999
     assert m["rgeom_mae_mm"] < 1e-6 and m["zgeom_mae_mm"] < 1e-6
-    # abs_bnd rebuilds (R,Z) from float32-stored centre+rho vs a float32-stored
-    # bnd_RZ; the reconstruction carries ~1 ulp of float32 noise (~1e-4 mm), so
-    # the floor is the storage precision, not zero.
+    # abs_bnd now rebuilds BOTH pred and truth from the same float32-stored
+    # centre+rho on the uniform theta grid, so pred==truth gives bit-identical
+    # reconstructions and the metric is exactly zero (no representation floor).
     assert m["abs_bnd_rmse_mm"] < 0.01
 
 
@@ -58,6 +58,9 @@ def test_known_offset_lands_in_the_right_units(tmp_path):
     assert m["rgeom_mae_mm"] == pytest.approx(1.0, abs=0.01)
     assert m["zgeom_mae_mm"] == pytest.approx(1.0, abs=0.01)
     assert m["centre_rmse_mm"] == pytest.approx(np.sqrt(2.0), abs=0.01)
+    # A uniform 1 mm offset on centre+rho reconstructs to err_m*sqrt(3) ~= 1.73 mm
+    # per vertex (dR=err_m*(1+cos), dZ=err_m*(1+sin); mean(cos)=mean(sin)=0 over
+    # the full uniform grid). The wide window just rejects a metres/mm unit bug.
     assert 0.5 < m["abs_bnd_rmse_mm"] < 5.0
 
 
