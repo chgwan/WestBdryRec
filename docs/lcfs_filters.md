@@ -35,6 +35,12 @@ are the unreadable shots. Adds 827 MB uncompressed, gzip-4 on disk.
 A portable side-car copy of the same table is at `figs/LCFS/gate_check/gate_slices.parquet`
 (22,982,105 rows, 174 MB, zstd) for analysis that would rather not open 1346 HDF5 files.
 
+> **On `NpzUni500` (newTrain V2) these criteria judge *interpolated* geometry.** That
+> branch resamples the boundary onto a uniform 500 Hz lattice before filtering, so a
+> smooth blend spanning a reconstruction dropout can pass. `NpzGeom` filters the raw
+> reconstruction and is unaffected. Use `src_gap_ms` in the V2 NPZ to tell the two
+> populations apart.
+
 ---
 
 ## 1. Shot level — still open

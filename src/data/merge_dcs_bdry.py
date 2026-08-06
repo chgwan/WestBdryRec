@@ -88,11 +88,16 @@ def uniform_grid(bnd_t, dcs_t, hz=500.0, clip_gap_ms=16.0, t_min=0.0):
     grid points. 16 ms sits between the 2.048 ms cadence and the 32.768 ms idle
     tier, so only the idle tier and genuine long dropouts terminate the grid.
 
-    Measured on the 759 selected shots this clip removes nothing (0 of 7 302 943
-    samples at t >= 0): ``t >= 0`` and the DCS span already bound the grid inside the
-    fast-acquisition window. It is kept as a guard for a future campaign or a
-    different ``hz``, and ``clip_dropped_*`` turn "it never fires" into a
-    per-build measurement rather than an assumption.
+    On the 759 selected shots the chosen window is the DCS span: GMAG reconstructs to
+    ~+38 s but the DCS actuator archive ends at a median +12.6 s, and there are no
+    actuator inputs past the DCS end to predict with. The clip therefore excludes
+    2 626 909 native GMAG samples (≈19 577.6 s) lying beyond the DCS end -- the same
+    exclusion ``NpzGeom`` applies via its own DCS clip (shot 57281 spans 0.058-11.854 s
+    here vs 0.057-11.855 s in V1). The 16 ms gap-rule guard is a secondary safety net,
+    redundant on this campaign because the DCS span already excludes the 30 Hz idle
+    tier -- it removes 0 additional samples beyond the DCS-span boundary. ``clip_dropped_*``
+    record the per-shot cost so "the DCS bound is the active one" stays a measured
+    fact rather than an assumption.
 
     Returns ``(grid, info)``. ``grid`` is empty when no usable window survives --
     the caller drops that shot.

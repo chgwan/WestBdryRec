@@ -229,6 +229,60 @@ so `dcs_actuator_geom_nope` is the recommended configuration.
 
 ---
 
+## 4c. WEST / DCS — the `NpzUni500` rebuild (newTrain V2, 2026-08-06)
+
+A third WEST branch beside `NpzOrigin` and `NpzGeom`; neither is replaced. Everything
+V1 established is retained — S0–S5 filters, per-slice `(Rgeom, Zgeom)` origin, 34-column
+target, 10 time-PE columns, same 18 strict actuators. **Only the time axis changes.**
+
+```mermaid
+flowchart LR
+    MAT["DCSHeating/*.mat"] --> MU["MergedH5Uni500/*.h5<br/>grid = generated 2.0 ms lattice<br/>EVERY channel interpolated onto it"]
+    GH5["GMagH5/*.h5"] --> MU
+    MU --> NU["NpzUni500/*.npz<br/>S0–S5 · per-slice centre · src_gap_ms"]
+    NU --> TR["train_dcs --npz-dir ProjDB/datasets/NpzUni500"]
+```
+
+**(1) Time base — a generated uniform lattice.** `t_k = k / 500 Hz`, phase-locked to
+ignitron `t=0`. V1's native axis was non-uniform (2.048 ms modal, gaps to ~33 ms, 0 of
+1346 shots uniform), which M2's step-indexed GRU reads as equal spacing. Here every step
+is physically equal and the lattice is identical across shots. Left edge `k₀ = 0` — S0
+(`t ≥ 0`) rejects negative time regardless. Right edge = the source overlap, clipped to
+the longest native run with gaps ≤ 16 ms.
+
+V1's monotonicity defect (27 shots with a non-increasing boundary timestamp, silently
+corrupting `np.interp`) is structurally impossible here: the grid is generated, not read.
+
+**(2) Both inputs and the target are interpolated.** This deliberately reverses V1's
+"never interpolate the LCFS". Consequence, accepted in the spec: **the S0–S5 filters
+judge interpolated geometry.** A blend spanning a dropout is smooth and can pass them.
+`src_gap_ms` records, per slice, the native spacing bracketing it, so the cost is
+measurable rather than assumed — `meta.json:grid.fabricated_valid_slices` counts valid
+slices whose bracketing reconstructions were > 3.072 ms apart.
+
+**(3) The grid is bounded to the DCS span.** GMAG reconstructs to ~+38 s but the DCS
+actuator archive ends at a median +12.6 s, and there are no actuator inputs past the DCS
+end to predict with — so the grid's right edge is the DCS end. This excludes
+**2 626 909** native GMAG samples (≈19 577.6 s of recording) that lie beyond the DCS end
+(`meta.json:grid.clip_dropped_n_total`). This is correct, and it is the *same* exclusion
+V1's `NpzGeom` applies via its own DCS clip: shot 57281 spans 0.058–11.854 s here vs
+0.057–11.855 s in V1. The 16 ms gap-rule guard is a secondary safety net, redundant on
+this campaign because the DCS span already excludes the 30 Hz idle tier — it removes 0
+additional samples beyond the DCS-span boundary. Evidence:
+`exploration/v2_grid_yield_check.py`, `exploration/plot_gmag_bnd_dt_timewise.py`.
+
+→ **759 npz, 7 387 826 slices in-span, 7 379 250 valid (99.88 %)**, 32 features,
+0 shots dropped. Split via `bench.load_filtered_split`: **607 train / 76 val / 76 test**.
+
+Consumers opt in: `train_dcs.py --npz-dir ProjDB/datasets/NpzUni500 --config
+configs/dcs_model_geom.yml --run-name dcs_actuator_uni500` (the `_nope` arm uses
+`configs/dcs_model.yml`). No new config files: `dcs_model_geom.yml` and `dcs_model.yml`
+differ only by `run:` and the PE rows, and `--run-name` overrides `run:`.
+
+Results: [`newtrain_results.md`](newtrain_results.md).
+
+---
+
 ## 5. IMAS stages
 
 | Stage | Module | Reads | Writes | Key operation |
@@ -277,6 +331,12 @@ so `dcs_actuator_geom_nope` is the recommended configuration.
 | `only` | `(nt,)` | int8 | criterion that rejects the slice *alone*, 0 = not unique |
 | `flags` | `(nt,)` | uint8 | bit *i* set = criterion *i* passes (order-free) |
 
+**`NpzUni500/<shot>.npz`** — the uniform-500 Hz rebuild (§4c). The `NpzGeom` schema plus
+one array: `src_gap_ms (nt,) float32` — the native `GMAG_BND` spacing bracketing each
+grid point, in ms (≈2.048 inside the normal cadence, the gap width across a dropout).
+The `time` array is the exact 2.0 ms lattice; `center`, `Y` and `bnd_RZ` are interpolated,
+not native.
+
 **`IMASNpz/<shot>.npz`**:
 
 | Array | Shape | dtype | Meaning |
@@ -311,6 +371,10 @@ python scripts/run_data_pre.py --workers 16
 # WEST — individual stage (e.g. rebuild only the NPZ from existing MergedH5)
 python -c "from src.data.build_npz import run; run(workers=16)"
 
+# WEST — V2 uniform 500 Hz branch (merge onto the generated lattice, then build NPZ)
+python -c "from src.data.merge_dcs_bdry import run; run(time_base='uniform', uniform_hz=500.0, clip_gap_ms=16.0, workers=16)"
+python -c "from src.data.build_npz import run; run(merged_dir='MergedH5Uni500', npz_dir='NpzUni500', workers=16)"
+
 # IMAS — build the IMAS-native NPZ (no scripts/ runner; importable module)
 python -c "from src.data.build_imas_npz import run; run()"
 
@@ -334,6 +398,8 @@ python scripts/train_m0.py       # IMAS M0 baseline
 | `mergednpz_dir` | `datasets/MergedNpz` | ✗ (renamed to `NpzOrigin`) | **stale — see below** |
 | `mergedh5_gmag_dir` | `datasets/MergedH5Gmag` | ✓ 759 `.h5` | ok (GMAG 488 Hz grid, §4b) |
 | `npzgeom_dir` | `datasets/NpzGeom` | ✓ 759 `.npz` | ok (filtered rebuild, §4b) |
+| `mergedh5_uni500_dir` | `datasets/MergedH5Uni500` | ✓ 759 `.h5` | ok (uniform 500 Hz grid, §4c) |
+| `npzuni500_dir` | `datasets/NpzUni500` | ✓ 759 `.npz` | ok (uniform 500 Hz rebuild, §4c) |
 | `imas_h5_dir` | `datasets/IMASH5` | ✓ 6187 `.h5` | ok |
 | `imas_npz_dir` | `datasets/IMASNpz` | ✓ 4560 `.npz` | ok |
 | `npz_dir` | `datasets/Npz` | ✗ (unused) | n/a |
