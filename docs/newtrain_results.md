@@ -10,6 +10,22 @@ numbers is **not attributable to any single one**. Run B isolates only the PE.
 A drop is not necessarily a regression: the baseline was partly scored on
 interpolated boundaries and on slices these filters reject.
 
+## Models
+
+All three share the same 18 strict-actuator inputs and predict the same 34 outputs;
+they differ in architecture and how much of the discharge each sees.
+
+| model | architecture | temporal context | notes |
+|---|---|---|---|
+| **m0** | HistGBT snapshot — 34 independent per-output `HistGradientBoostingRegressor`s fit on the single-time-step actuator snapshot | none | weakest; no early stopping (iterative boosting). `train_m0_dcs` |
+| **m1** | ResMLP — residual MLP on the same single-time-step snapshot | none | val early-stop. `train_m1_dcs`, `ResMLP` |
+| **m2** | ActSeqGRU — linear-time GRU over the **full per-shot actuator series** | **yes** (whole discharge) | strongest; the only model that sees time evolution. `train_m2_dcs`, `ActSeqGRU` |
+
+m0/m1 are snapshot models (one prediction per time-step from that step's actuators
+alone); m2 reads the whole actuator series at once. That is why m2 alone recovers a
+high R² — about the plasma's own centre `r(θ)` is pure *shape* (position removed),
+which needs temporal context to predict well, where the snapshot models cannot.
+
 ## dcs_actuator_geom — with time PE (headline)
 
 | model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |
