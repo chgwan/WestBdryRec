@@ -13,6 +13,8 @@ import torch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+from src.ml.target import N_OUT  # noqa: E402
+
 
 def test_nan_times_zero_poisons_a_multiplicative_mask():
     """Pin the failure mode itself, so nobody 'simplifies' the zero-fill away."""
@@ -53,4 +55,4 @@ def test_seq_dataset_zero_fills_rejected_targets(tmp_path, monkeypatch):
     assert torch.isfinite(loss)
     loss.backward()
     assert torch.isfinite(pred.grad).all()
-    assert torch.allclose(pred.grad[3], torch.zeros(n_rho))
+    assert torch.allclose(pred.grad[3], torch.zeros(N_OUT))

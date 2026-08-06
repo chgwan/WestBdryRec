@@ -25,6 +25,7 @@ from .dataset import engineer, FEATURE_ORDER, keep_mask
 from .dataset import SnapshotDataset, SeqDataset
 from .dcs_features import load_dcs_config, load_meta, node_col_map, read_snapshot, read_series
 from .metrics import ccc
+from .target import N_OUT, load_target, standardize, target_mean_std
 from .models import ResMLP, ActSeqGRU
 from .predictions import save_predictions
 from .split import split_shots_3
@@ -94,38 +95,45 @@ def train_m0_dcs(npz_dir, out_path, cfg=None, shots=None, max_per_shot=None):
     ncm = node_col_map(load_meta(npz_dir))
     mps = max_per_shot if max_per_shot is not None else cfg.get("max_per_shot")
     rng = np.random.default_rng(0)
+    tgt_mean, tgt_std = target_mean_std(npz_dir, train)
     Xs, Ys = [], []
     for s in train:
         p = npz_dir / f"{int(s)}.npz"
         if not p.exists():
             continue
         feats, mask = read_snapshot(p, cfg, ncm)
-        Y = np.load(p)["Y"].astype(float)
-        v = mask & np.isfinite(Y).all(1) & np.isfinite(feats).all(1)
+        T_all, finite = load_target(p)
+        T_all = standardize(T_all, tgt_mean, tgt_std)
+        v = mask & finite & np.isfinite(feats).all(1)
         idx = np.where(v)[0]
         if mps and idx.size > mps:
             idx = np.sort(rng.choice(idx, mps, replace=False))
         if idx.size:
-            Xs.append(feats[idx]); Ys.append(Y[idx])
+            Xs.append(feats[idx]); Ys.append(T_all[idx])
     Xtr, Ytr = np.concatenate(Xs), np.concatenate(Ys)
+    assert Ytr.shape[1] == N_OUT, f"expected {N_OUT} target columns, got {Ytr.shape[1]}"
     keep = keep_mask(Xtr.std(0))
     Xk = Xtr[:, keep]
     m0 = [HistGradientBoostingRegressor(**hp).fit(Xk, Ytr[:, a]) for a in range(Ytr.shape[1])]
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump({"m0": m0, "keep": keep, "cfg": cfg}, out_path)
+    joblib.dump({"m0": m0, "keep": keep, "cfg": cfg,
+                 "tgt_mean": tgt_mean, "tgt_std": tgt_std}, out_path)
     pred = np.column_stack([m.predict(Xk) for m in m0])
     return {"n_train": int(len(Ytr)), "n_features": int(keep.sum()),
-            "train_ccc": float(ccc(pred, Ytr))}
+            "n_out": int(Ytr.shape[1]), "train_ccc": float(ccc(pred, Ytr))}
 
 
 class DCSSnapshotDataset(torch.utils.data.Dataset):
     """Per-slice (engineered strict-actuator snapshot -> rho) over a shot set."""
 
-    def __init__(self, npz_dir, shots, cfg, ncm, mean, std, max_per_shot=None):
+    def __init__(self, npz_dir, shots, cfg, ncm, mean, std, max_per_shot=None,
+                 tgt_mean=None, tgt_std=None):
         self.keep = np.asarray(std, float) > 0
         self.mean = np.asarray(mean, float)[self.keep]
         self.std = np.asarray(std, float)[self.keep]
+        self.tgt_mean = None if tgt_mean is None else np.asarray(tgt_mean, float)
+        self.tgt_std = None if tgt_std is None else np.asarray(tgt_std, float)
         self.rows = []
         rng = np.random.default_rng(0)
         mps = max_per_shot if max_per_shot is not None else cfg.get("max_per_shot")
@@ -134,14 +142,16 @@ class DCSSnapshotDataset(torch.utils.data.Dataset):
             if not p.exists():
                 continue
             feats, mask = read_snapshot(p, cfg, ncm)
-            Y = np.load(p)["Y"].astype(np.float32)
-            v = mask & np.isfinite(Y).all(1) & np.isfinite(feats).all(1)
+            T_all, finite = load_target(p)
+            if self.tgt_mean is not None:
+                T_all = standardize(T_all, self.tgt_mean, self.tgt_std)
+            v = mask & finite & np.isfinite(feats).all(1)
             idx = np.where(v)[0]
             if mps and idx.size > mps:
                 idx = np.sort(rng.choice(idx, mps, replace=False))
             Xk = feats[:, self.keep]
             for i in idx:
-                self.rows.append((Xk[i], Y[i]))
+                self.rows.append((Xk[i], T_all[i].astype(np.float32)))
 
     def __len__(self):
         return len(self.rows)
@@ -175,10 +185,14 @@ def train_m1_dcs(npz_dir, out_path, cfg=None, shots=None):
         train, val = split_shots_3(list(shots))[:2]
     ncm = node_col_map(load_meta(npz_dir))
     mean, std = _dcs_train_mean_std(npz_dir, train, cfg, ncm)
-    ds_tr = DCSSnapshotDataset(npz_dir, train, cfg, ncm, mean, std)
-    ds_va = DCSSnapshotDataset(npz_dir, val, cfg, ncm, mean, std)
+    tgt_mean, tgt_std = target_mean_std(npz_dir, train)
+    ds_tr = DCSSnapshotDataset(npz_dir, train, cfg, ncm, mean, std,
+                               tgt_mean=tgt_mean, tgt_std=tgt_std)
+    ds_va = DCSSnapshotDataset(npz_dir, val, cfg, ncm, mean, std,
+                               tgt_mean=tgt_mean, tgt_std=tgt_std)
     keep = ds_tr.keep
-    model = ResMLP(n_in=int(keep.sum()), hidden=cfg["hp"]["m1"]["hidden"],
+    model = ResMLP(n_in=int(keep.sum()), n_out=N_OUT,
+                   hidden=cfg["hp"]["m1"]["hidden"],
                    depth=cfg["hp"]["m1"]["depth"], dropout=cfg["hp"]["m1"]["dropout"])
     hpm = cfg["hp"]["m1"]
     train_neural(model, DataLoader(ds_tr, batch_size=2048, shuffle=True),
@@ -187,7 +201,8 @@ def train_m1_dcs(npz_dir, out_path, cfg=None, shots=None):
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"state": model.state_dict(), "keep": keep, "hp": hpm,
-                "n_in": int(keep.sum()), "mean": mean, "std": std}, out_path)
+                "n_in": int(keep.sum()), "mean": mean, "std": std,
+                "tgt_mean": tgt_mean, "tgt_std": tgt_std, "n_out": N_OUT}, out_path)
     return {"best_val_mse": float(model.best_val_mse),
             "stop_epoch": int(model.stop_epoch), "n_in": int(keep.sum())}
 
@@ -201,9 +216,12 @@ class DCSSeqDataset(torch.utils.data.Dataset):
     ``read_series``, targets zeroed here) and masked out of the loss by the trainer.
     """
 
-    def __init__(self, npz_dir, shots, cfg, ncm, mean, std):
+    def __init__(self, npz_dir, shots, cfg, ncm, mean, std,
+                 tgt_mean=None, tgt_std=None):
         self.mean = np.asarray(mean, float)
         self.std = np.maximum(np.asarray(std, float), 1e-6)
+        self.tgt_mean = None if tgt_mean is None else np.asarray(tgt_mean, float)
+        self.tgt_std = None if tgt_std is None else np.asarray(tgt_std, float)
         self.rows = []
         n_act = None
         for s in shots:
@@ -211,14 +229,14 @@ class DCSSeqDataset(torch.utils.data.Dataset):
             if not p.exists():
                 continue
             A, mask = read_series(p, cfg, ncm)
-            Y = np.load(p)["Y"].astype(np.float32)
-            v = mask & np.isfinite(Y).all(1) & np.isfinite(A).all(1)
-            # The trainer masks by multiplication and NaN * 0 = NaN, so a single
-            # filter-rejected slice would make the loss and every gradient NaN. Zero-fill
-            # the target after the mask is computed -- the mask, not the value, is what
-            # excludes the step. Same convention read_series already uses for the inputs.
-            Y = np.nan_to_num(Y, nan=0.0, posinf=0.0, neginf=0.0)
-            self.rows.append((A, Y, v))
+            T_all, finite = load_target(p)
+            if self.tgt_mean is not None:
+                T_all = standardize(T_all, self.tgt_mean, self.tgt_std)
+            v = mask & finite & np.isfinite(A).all(1)
+            # zero-fill AFTER masking: the trainer multiplies by the mask and
+            # NaN * 0 = NaN, which would make the loss and every gradient NaN.
+            T_all = np.nan_to_num(T_all, nan=0.0, posinf=0.0, neginf=0.0)
+            self.rows.append((A, T_all.astype(np.float32), v))
             n_act = A.shape[1]
         self.n_act = int(n_act) if n_act is not None else 0
 
@@ -271,11 +289,14 @@ def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
         train, val = split_shots_3(list(shots))[:2]
     ncm = node_col_map(load_meta(npz_dir))
     mean, std = _dcs_series_mean_std(npz_dir, train, cfg, ncm)
-    ds_tr = DCSSeqDataset(npz_dir, train, cfg, ncm, mean, std)
-    ds_va = DCSSeqDataset(npz_dir, val, cfg, ncm, mean, std)
+    tgt_mean, tgt_std = target_mean_std(npz_dir, train)
+    ds_tr = DCSSeqDataset(npz_dir, train, cfg, ncm, mean, std,
+                          tgt_mean=tgt_mean, tgt_std=tgt_std)
+    ds_va = DCSSeqDataset(npz_dir, val, cfg, ncm, mean, std,
+                          tgt_mean=tgt_mean, tgt_std=tgt_std)
     hpm = cfg["hp"]["m2"]
-    model = ActSeqGRU(n_act=ds_tr.n_act, hidden=hpm["hidden"], layers=hpm["layers"],
-                      dropout=hpm["dropout"]).to(_device())
+    model = ActSeqGRU(n_act=ds_tr.n_act, n_out=N_OUT, hidden=hpm["hidden"],
+                      layers=hpm["layers"], dropout=hpm["dropout"]).to(_device())
     opt = torch.optim.AdamW(model.parameters(), lr=hpm["lr"], weight_decay=1e-5)
     best, best_state, bad = 1e9, None, 0
     for ep in range(hpm["epochs"]):
@@ -305,7 +326,8 @@ def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
         model.load_state_dict(best_state)
     out_path = pathlib.Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"state": model.state_dict(), "n_act": ds_tr.n_act, "hp": hpm,
-                "mean": mean, "std": std}, out_path)
+                "mean": mean, "std": std,
+                "tgt_mean": tgt_mean, "tgt_std": tgt_std, "n_out": N_OUT}, out_path)
     model.best_val_mse = float(best)
     return {"best_val_mse": float(best), "n_act": ds_tr.n_act}
 
