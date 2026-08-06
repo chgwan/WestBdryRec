@@ -208,9 +208,9 @@ def train_m1_dcs(npz_dir, out_path, cfg=None, shots=None):
 
 
 class DCSSeqDataset(torch.utils.data.Dataset):
-    """Per-shot full actuator series (n_act -> 32 rho per step) over a shot set.
+    """Per-shot full actuator series (n_act -> 34 outputs (rho + centre)) over a shot set.
 
-    Each item is one whole shot: ``(A(L, n_act), Y(L, 32), mask(L,))``. The
+    Each item is one whole shot: ``(A(L, n_act), Y(L, 34), mask(L,))``. The
     series is not subsampled (the GRU is linear-time). Normalization uses the
     per-channel mean/std over valid steps; invalid steps are kept (inputs zeroed by
     ``read_series``, targets zeroed here) and masked out of the loss by the trainer.

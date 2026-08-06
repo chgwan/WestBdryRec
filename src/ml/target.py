@@ -31,6 +31,10 @@ def load_target(npz_path):
     filters carry ``Y = NaN`` by design, so this is the caller's signal, not an error.
     """
     d = np.load(npz_path)
+    if "center" not in d.files:
+        raise ValueError(
+            f"{npz_path}: missing 'center' array — the 34-column target "
+            "(r(theta)@32 + absolute Rgeom, Zgeom) requires an NpzGeom-style dataset")
     Y = d["Y"].astype(float)
     C = d["center"].astype(float)
     if Y.ndim != 2 or Y.shape[1] != N_RHO:
