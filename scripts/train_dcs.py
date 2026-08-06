@@ -17,6 +17,8 @@ from src.ml.dcs_features import (load_dcs_config, load_meta, node_col_map,  # no
 from src.ml.models import ResMLP, ActSeqGRU  # noqa: E402
 from src.ml.predictions import save_predictions  # noqa: E402
 from src.ml.train import (train_m0_dcs, train_m1_dcs, train_m2_dcs, _device)  # noqa: E402
+from src.ml.target import N_OUT, destandardize  # noqa: E402
+from src.ml.target import load_target  # noqa: E402
 
 CFG = get_proj_config()
 
@@ -28,24 +30,27 @@ def _meta_ncm(npz_dir):
 
 def _pred_m0(art, npz_dir, shots, cfg, ncm, out):
     a = joblib.load(art); m0, keep = a["m0"], a["keep"]
+    tgt_mean, tgt_std = a["tgt_mean"], a["tgt_std"]
     preds = {}
     for s in shots:
         p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
         if not p.exists():
             continue
         feats, mask = read_snapshot(p, cfg, ncm)
-        Y = np.load(p)["Y"].astype(float)
-        v = mask & np.isfinite(Y).all(1) & np.isfinite(feats).all(1)
+        T_all, finite = load_target(p)
+        v = mask & finite & np.isfinite(feats).all(1)
         if v.any():
             Xk = feats[v][:, keep]
-            preds[int(s)] = np.column_stack([m.predict(Xk) for m in m0]).astype(np.float32)
+            z = np.column_stack([m.predict(Xk) for m in m0])
+            preds[int(s)] = destandardize(z, tgt_mean, tgt_std).astype(np.float32)
     save_predictions(out, preds)
 
 
 def _pred_m1(art, npz_dir, shots, cfg, ncm, out):
     a = torch.load(art, map_location="cpu", weights_only=False)
     keep, hp = a["keep"], a["hp"]
-    model = ResMLP(a["n_in"], hidden=hp["hidden"], depth=hp["depth"], dropout=hp["dropout"]).to(_device()).eval()
+    model = ResMLP(a["n_in"], n_out=a.get("n_out", N_OUT), hidden=hp["hidden"],
+                   depth=hp["depth"], dropout=hp["dropout"]).to(_device()).eval()
     model.load_state_dict(a["state"])
     mean = np.asarray(a["mean"], float)[keep]; std = np.maximum(np.asarray(a["std"], float)[keep], 1e-6)
     preds = {}
@@ -55,19 +60,20 @@ def _pred_m1(art, npz_dir, shots, cfg, ncm, out):
             if not p.exists():
                 continue
             feats, mask = read_snapshot(p, cfg, ncm)
-            Y = np.load(p)["Y"].astype(float)
-            v = mask & np.isfinite(Y).all(1) & np.isfinite(feats).all(1)
+            T_all, finite = load_target(p)
+            v = mask & finite & np.isfinite(feats).all(1)
             if v.any():
                 Xk = ((feats[v][:, keep] - mean) / std).astype(np.float32)
-                preds[int(s)] = model(torch.from_numpy(Xk).to(_device())).cpu().numpy()
+                z = model(torch.from_numpy(Xk).to(_device())).cpu().numpy()
+                preds[int(s)] = destandardize(z, a["tgt_mean"], a["tgt_std"]).astype(np.float32)
     save_predictions(out, preds)
 
 
 def _pred_m2(art, npz_dir, shots, cfg, ncm, out):
     a = torch.load(art, map_location="cpu", weights_only=False)
     hp = a["hp"]; mean = np.asarray(a["mean"], float); std = np.maximum(np.asarray(a["std"], float), 1e-6)
-    model = ActSeqGRU(n_act=a["n_act"], hidden=hp["hidden"], layers=hp["layers"],
-                      dropout=hp["dropout"]).to(_device()).eval()
+    model = ActSeqGRU(n_act=a["n_act"], n_out=a.get("n_out", N_OUT), hidden=hp["hidden"],
+                      layers=hp["layers"], dropout=hp["dropout"]).to(_device()).eval()
     model.load_state_dict(a["state"])
     preds = {}
     with torch.no_grad():
@@ -76,8 +82,8 @@ def _pred_m2(art, npz_dir, shots, cfg, ncm, out):
             if not p.exists():
                 continue
             A, mask = read_series(p, cfg, ncm)
-            Y = np.load(p)["Y"].astype(float)
-            v = mask & np.isfinite(Y).all(1)
+            T_all, finite = load_target(p)
+            v = mask & finite
             if v.any():
                 X = np.ascontiguousarray(((A - mean) / std)[None]).astype(np.float32)
                 mk = v[None]
@@ -89,7 +95,8 @@ def _pred_m2(art, npz_dir, shots, cfg, ncm, out):
                     torch.backends.cudnn.enabled = False
                     yhat = model(Xt, mk_t)
                     torch.backends.cudnn.enabled = True
-                preds[int(s)] = yhat[0].cpu().numpy()[v].astype(np.float32)
+                z = yhat[0].cpu().numpy()[v]
+                preds[int(s)] = destandardize(z, a["tgt_mean"], a["tgt_std"]).astype(np.float32)
     save_predictions(out, preds)
 
 
