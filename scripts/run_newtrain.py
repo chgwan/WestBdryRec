@@ -28,11 +28,23 @@ RUNS = [
     {"run_name": "dcs_actuator_geom",
      "config": "configs/dcs_model_geom.yml",
      "npz_dir": "ProjDB/datasets/NpzGeom",
+     "dataset": "NpzGeom — native GMAG_BND time base (V1)",
      "label": "with time PE (headline)"},
     {"run_name": "dcs_actuator_geom_nope",
      "config": "configs/dcs_model.yml",
      "npz_dir": "ProjDB/datasets/NpzGeom",
+     "dataset": "NpzGeom — native GMAG_BND time base (V1)",
      "label": "no time PE (ablation)"},
+    {"run_name": "dcs_actuator_uni500",
+     "config": "configs/dcs_model_geom.yml",
+     "npz_dir": "ProjDB/datasets/NpzUni500",
+     "dataset": "NpzUni500 — uniform 500 Hz lattice, target interpolated (V2)",
+     "label": "with time PE"},
+    {"run_name": "dcs_actuator_uni500_nope",
+     "config": "configs/dcs_model.yml",
+     "npz_dir": "ProjDB/datasets/NpzUni500",
+     "dataset": "NpzUni500 — uniform 500 Hz lattice, target interpolated (V2)",
+     "label": "no time PE"},
 ]
 BENCH = CFG.stats_dir / "dcs_predictor" / "bench_table_geom.csv"
 REPORT = CFG.base_dir / "docs" / "newtrain_results.md"
@@ -74,16 +86,22 @@ def write_report(csv_path, out_path):
     """Markdown comparison of every unit against the NpzOrigin baseline."""
     rows = _rows(csv_path)
     L = ["# newTrain retrain results", "",
-         "Dataset `NpzGeom` (GMAG-native time base, S0-S5 filters, per-slice centre,",
-         "34 outputs = r(theta)@32 + absolute (Rgeom, Zgeom)).",
-         "Baseline is `NpzOrigin` / `dcs_actuator`, 76 test shots.", "",
-         "Five things differ from the baseline at once (time base, slice population,",
+         "Baseline is `NpzOrigin` / `dcs_actuator`, 76 test shots.",
+         "34 outputs = r(theta)@32 + absolute (Rgeom, Zgeom); S0-S5 slice filters and",
+         "the per-slice GMAG_GEOM centre apply to every run below.", "",
+         "Several things differ from the baseline at once (time base, slice population,",
          "target origin, input columns, output width), so a difference in the r(theta)",
-         "numbers is **not attributable to any single one**. Run B isolates only the PE.",
+         "numbers is **not attributable to any single one**. The `_nope` runs isolate",
+         "the PE; the `uni500` pair isolates the uniform axis against `geom`.",
          "A drop is not necessarily a regression: the baseline was partly scored on",
-         "interpolated boundaries and on slices these filters reject.", ""]
+         "interpolated boundaries and on slices these filters reject.",
+         "",
+         "On `NpzUni500` the target itself is interpolated onto the lattice, so the",
+         "S0-S5 filters there judge interpolated geometry -- see `src_gap_ms` and",
+         "`meta.json:grid.fabricated_valid_slices` for how much.", ""]
     for run in RUNS:
         L += [f"## {run['run_name']} — {run['label']}", "",
+              f"Dataset: {run['dataset']}", "",
               "| model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | "
               "centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |",
               "|---|---|---|---|---|---|---|---|---|---|"]

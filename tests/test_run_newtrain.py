@@ -16,14 +16,20 @@ def _load():
     return mod
 
 
-def test_run_matrix_is_the_two_specified_runs():
+def test_run_matrix_is_the_four_specified_runs():
     mod = _load()
     names = [r["run_name"] for r in mod.RUNS]
-    assert names == ["dcs_actuator_geom", "dcs_actuator_geom_nope"]
-    a, b = mod.RUNS
-    assert a["config"].endswith("dcs_model_geom.yml")      # with time PE
-    assert b["config"].endswith("dcs_model.yml")           # PE ablation
-    assert all(r["npz_dir"].endswith("NpzGeom") for r in mod.RUNS)
+    assert names == ["dcs_actuator_geom", "dcs_actuator_geom_nope",
+                     "dcs_actuator_uni500", "dcs_actuator_uni500_nope"]
+    geom, geom_nope, uni, uni_nope = mod.RUNS
+    # PE arms use the geom config (18 actuators + 10 PE); ablations reuse dcs_model.yml
+    assert geom["config"].endswith("dcs_model_geom.yml")
+    assert uni["config"].endswith("dcs_model_geom.yml")
+    assert geom_nope["config"].endswith("dcs_model.yml")
+    assert uni_nope["config"].endswith("dcs_model.yml")
+    assert geom["npz_dir"].endswith("NpzGeom") and geom_nope["npz_dir"].endswith("NpzGeom")
+    assert uni["npz_dir"].endswith("NpzUni500") and uni_nope["npz_dir"].endswith("NpzUni500")
+    assert all("dataset" in r for r in mod.RUNS), "the report labels each section"
 
 
 def test_done_detects_a_finished_unit(tmp_path):

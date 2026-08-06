@@ -1,14 +1,19 @@
 # newTrain retrain results
 
-Dataset `NpzGeom` (GMAG-native time base, S0-S5 filters, per-slice centre,
-34 outputs = r(theta)@32 + absolute (Rgeom, Zgeom)).
 Baseline is `NpzOrigin` / `dcs_actuator`, 76 test shots.
+34 outputs = r(theta)@32 + absolute (Rgeom, Zgeom); S0-S5 slice filters and
+the per-slice GMAG_GEOM centre apply to every run below.
 
-Five things differ from the baseline at once (time base, slice population,
+Several things differ from the baseline at once (time base, slice population,
 target origin, input columns, output width), so a difference in the r(theta)
-numbers is **not attributable to any single one**. Run B isolates only the PE.
+numbers is **not attributable to any single one**. The `_nope` runs isolate
+the PE; the `uni500` pair isolates the uniform axis against `geom`.
 A drop is not necessarily a regression: the baseline was partly scored on
 interpolated boundaries and on slices these filters reject.
+
+On `NpzUni500` the target itself is interpolated onto the lattice, so the
+S0-S5 filters there judge interpolated geometry -- see `src_gap_ms` and
+`meta.json:grid.fabricated_valid_slices` for how much.
 
 ## Models
 
@@ -28,6 +33,8 @@ which needs temporal context to predict well, where the snapshot models cannot.
 
 ## dcs_actuator_geom — with time PE (headline)
 
+Dataset: NpzGeom — native GMAG_BND time base (V1)
+
 | model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |
 |---|---|---|---|---|---|---|---|---|---|
 | m0 | 0.9519 | 0.5523 | 1.7174 | 5.8035 | 4.4158 | 25.1923 | 30.7964 | 76 | 0.9579 / 0.8452 |
@@ -35,6 +42,8 @@ which needs temporal context to predict well, where the snapshot models cannot.
 | m2 | 0.9761 | 0.7805 | 1.2025 | 6.8827 | 4.0815 | 17.3323 | 20.4465 | 76 | 0.9668 / 0.8763 |
 
 ## dcs_actuator_geom_nope — no time PE (ablation)
+
+Dataset: NpzGeom — native GMAG_BND time base (V1)
 
 | model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |
 |---|---|---|---|---|---|---|---|---|---|
@@ -45,4 +54,24 @@ which needs temporal context to predict well, where the snapshot models cannot.
 > **Best overall — `dcs_actuator_geom_nope/m2` (bolded):** CCC 0.9856 beats the baseline
 > (0.9668), R² 0.869 matches it (0.876), and it is the only unit under 1 cm RMSE with the
 > lowest centre / absolute-boundary error. This is the recommended deployment config.
+
+## dcs_actuator_uni500 — with time PE
+
+Dataset: NpzUni500 — uniform 500 Hz lattice, target interpolated (V2)
+
+| model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |
+|---|---|---|---|---|---|---|---|---|---|
+| m0 | not run | | | | | | | | 0.9579 / 0.8452 |
+| m1 | not run | | | | | | | | 0.9530 / 0.8284 |
+| m2 | not run | | | | | | | | 0.9668 / 0.8763 |
+
+## dcs_actuator_uni500_nope — no time PE
+
+Dataset: NpzUni500 — uniform 500 Hz lattice, target interpolated (V2)
+
+| model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |
+|---|---|---|---|---|---|---|---|---|---|
+| m0 | not run | | | | | | | | 0.9579 / 0.8452 |
+| m1 | not run | | | | | | | | 0.9530 / 0.8284 |
+| m2 | not run | | | | | | | | 0.9668 / 0.8763 |
 
