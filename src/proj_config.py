@@ -53,6 +53,16 @@ class ProjConfig(BaseSettings):
         return self.proj_db_dir / "datasets" / "NpzGeom"
 
     @property
+    def mergedh5_uni500_dir(self) -> pathlib.Path:
+        """Merged H5 on the uniform 500 Hz lattice (newTrain V2)."""
+        return self.proj_db_dir / "datasets" / "MergedH5Uni500"
+
+    @property
+    def npzuni500_dir(self) -> pathlib.Path:
+        """Trainable NPZ built from the uniform 500 Hz merge (newTrain V2)."""
+        return self.proj_db_dir / "datasets" / "NpzUni500"
+
+    @property
     def npz_dir(self) -> pathlib.Path:
         return self.proj_db_dir / "datasets" / "Npz"
 

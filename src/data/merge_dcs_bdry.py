@@ -213,7 +213,7 @@ def read_dcs_mat(mat_path):
 
 def _merge_one(args):
     """Worker: build one resampled MergedH5/<shot>.h5. Returns (shot, ok, err)."""
-    shot, bnd_dir, dcs_dir, merged_dir, time_base = args
+    shot, bnd_dir, dcs_dir, merged_dir, time_base, uniform_hz, clip_gap_ms = args
     bnd_path = bnd_dir / f"{shot}.h5"
     dcs_path = dcs_dir / f"DCS_archive_{shot}.mat"
     out_path = merged_dir / f"{shot}.h5"
@@ -228,6 +228,7 @@ def _merge_one(args):
 
         with h5py.File(bnd_path, "r") as hf_bnd:
             gb_t = np.asarray(hf_bnd["targets/GMAG_BND_time"][:], float).reshape(-1)
+            ginfo = None
             if time_base == "gmag":
                 # The LCFS is what we predict, so it must never be interpolated: the
                 # grid IS the GMAG_BND reconstruction time, clipped to the DCS span so
@@ -258,6 +259,18 @@ def _merge_one(args):
                 if win.size < 2:
                     return shot, False, "empty DCS/GMAG_BND overlap"
                 grid = dcs_time[int(win[0]):int(win[-1]) + 1]
+            elif time_base == "uniform":
+                # V2: a generated lattice, so every step is physically equal and the
+                # axis is identical across shots. Both the inputs AND the target are
+                # interpolated onto it -- deliberately unlike time_base='gmag',
+                # which exists to keep the target bit-identical to the raw
+                # reconstruction. Consequence accepted in the spec: the S0-S5 filters
+                # in build_npz then judge interpolated geometry, and src_gap_ms below
+                # is what keeps that cost measurable.
+                grid, ginfo = uniform_grid(gb_t, dcs_time, hz=uniform_hz,
+                                           clip_gap_ms=clip_gap_ms)
+                if grid.size < 2:
+                    return shot, False, "no usable uniform window"
             else:
                 return shot, False, f"unknown time_base {time_base!r}"
 
@@ -267,6 +280,12 @@ def _merge_one(args):
                 hf_out.attrs["time_base"] = "ignitron"
                 hf_out.attrs["grid_source"] = time_base
                 hf_out.attrs["grid_n"] = grid.size
+                if ginfo is not None:
+                    hf_out.attrs["grid_source"] = f"uniform{int(round(uniform_hz))}"
+                    for k, v in ginfo.items():
+                        hf_out.attrs[k] = v
+                    hf_out.create_dataset("src_gap_ms",
+                                          data=native_gap_on_grid(grid, gb_t))
                 hf_out.create_dataset("time", data=grid)
 
                 # DCS scopes: resampled onto the grid (identity when time_base='dcs',
@@ -303,13 +322,16 @@ def _merge_one(args):
 
 
 def run(bnd_dir=None, dcs_dir=None, merged_dir=None, status_csv=None,
-        flat_top_csv=None, workers=1, time_base="gmag"):
+        flat_top_csv=None, workers=1, time_base="gmag",
+        uniform_hz=500.0, clip_gap_ms=16.0):
     """Build MergedH5 for every selected shot.
 
     ``time_base='gmag'`` (default) makes the shared grid the native 488 Hz
     ``GMAG_BND_time``, so the LCFS target is never interpolated and every slice is a
     real reconstruction. ``'dcs'`` reproduces the historical ~1 kHz DCS grid, which
     interpolated the boundary -- kept only to regenerate the old baseline.
+    ``time_base='uniform'`` generates a ``uniform_hz`` lattice off ignitron t=0 and
+    interpolates every channel onto it, target included (newTrain V2).
     """
     cfg = get_proj_config()
     bnd_dir = pathlib.Path(bnd_dir) if bnd_dir else cfg.gmagh5_dir
@@ -324,15 +346,18 @@ def run(bnd_dir=None, dcs_dir=None, merged_dir=None, status_csv=None,
     print(f"  DCS .mat  : {dcs_dir}")
     print(f"  boundary  : {bnd_dir}")
     print(f"  output    : {merged_dir}")
-    print(f"  time base : {time_base} "
-          f"({'GMAG_BND native, target not interpolated' if time_base == 'gmag' else 'DCS grid, boundary interpolated'})")
+    desc = {"gmag": "GMAG_BND native, target not interpolated",
+            "dcs": "DCS grid, boundary interpolated",
+            "uniform": f"uniform {uniform_hz:g} Hz lattice, everything interpolated"}
+    print(f"  time base : {time_base} ({desc.get(time_base, '?')})")
 
     # regenerate the dataset (new format incompatible with the old Merged files)
     if merged_dir.exists():
         shutil.rmtree(merged_dir)
     merged_dir.mkdir(parents=True, exist_ok=True)
 
-    items = [(s, bnd_dir, dcs_dir, merged_dir, time_base) for s in sel]
+    items = [(s, bnd_dir, dcs_dir, merged_dir, time_base, uniform_hz, clip_gap_ms)
+             for s in sel]
     results = pmap(_merge_one, items, workers, "merging")
 
     ok = sum(1 for _, success, _ in results if success)

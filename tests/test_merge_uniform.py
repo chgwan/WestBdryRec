@@ -117,6 +117,130 @@ def test_gap_is_finite_at_and_beyond_the_native_edges():
     assert np.all(np.isfinite(gap)), "edge points clamp to the nearest interval"
 
 
+# ---------------------------------------------------------------------------
+# Integration: time_base='uniform' wiring (Task 3). These monkeypatch
+# ``read_dcs_mat`` rather than building a synthetic ``.mat``, so the uniform
+# branch is exercised end-to-end without scipy fixtures.
+# ---------------------------------------------------------------------------
+import h5py
+import pytest
+
+from src.data import merge_dcs_bdry as M  # noqa: E402
+
+
+def _write_gmag(path, t0=-30.0, t1=18.0, step=MODAL):
+    """A minimal GMagH5: a linearly growing ring so interpolation is predictable."""
+    t = np.arange(t0, t1, step)
+    n = t.size
+    bnd = np.zeros((64, n))
+    geom = np.zeros((16, n))
+    th = np.arange(32) / 32 * 2 * np.pi
+    for j in range(n):
+        r = 0.40 + 0.01 * t[j]              # radius grows 1 cm per second
+        bnd[0::2, j] = 2.4 + r * np.cos(th)
+        bnd[1::2, j] = 0.05 + r * np.sin(th)
+        geom[0, j], geom[1, j] = 2400.0, 50.0        # mm
+    with h5py.File(path, "w") as hf:
+        hf.attrs["time_reference"] = "ignitron"
+        hf.create_dataset("targets/GMAG_BND", data=bnd)
+        hf.create_dataset("targets/GMAG_BND_time", data=t)
+        hf.create_dataset("inputs/GMAG_GEOM", data=geom)
+        hf.create_dataset("inputs/GMAG_GEOM_time", data=t)
+    return t
+
+
+def _merge(tmp_path, monkeypatch, dcs_t1=12.6):
+    bnd_dir = tmp_path / "gmag"; bnd_dir.mkdir()
+    dcs_dir = tmp_path / "dcs"; dcs_dir.mkdir()
+    out_dir = tmp_path / "merged"; out_dir.mkdir()
+    _write_gmag(bnd_dir / "999.h5")
+    (dcs_dir / "DCS_archive_999.mat").write_text("stub")   # existence check only
+
+    dcs_t = np.arange(-29.5, dcs_t1, 0.001)
+    ramp = np.linspace(0.0, 100.0, dcs_t.size)
+    monkeypatch.setattr(M, "read_dcs_mat",
+                        lambda p: (dcs_t, {"Ip_scope": (ramp, 2 * ramp)}))
+    shot, ok, err = M._merge_one((999, bnd_dir, dcs_dir, out_dir,
+                                  "uniform", 500.0, 16.0))
+    assert ok, err
+    return out_dir / "999.h5", dcs_t, ramp
+
+
+def test_merged_uniform_attrs_and_lattice(tmp_path, monkeypatch):
+    path, _, _ = _merge(tmp_path, monkeypatch)
+    with h5py.File(path) as hf:
+        t = hf["time"][:]
+        assert hf.attrs["grid_source"] == "uniform500"
+        assert hf.attrs["time_base"] == "ignitron"
+        assert hf.attrs["grid_hz"] == 500.0
+        k0 = int(hf.attrs["grid_k0"])
+        assert np.array_equal(t, (np.arange(k0, k0 + t.size)) * DT)
+        assert "src_gap_ms" in hf and hf["src_gap_ms"].shape == t.shape
+
+
+def test_target_is_interpolated_to_the_exact_blend(tmp_path, monkeypatch):
+    """V2's defining behaviour. V1's suite pins the target bit-identical to the raw
+    reconstruction; V2 must pin the opposite -- a real linear blend."""
+    path, _, _ = _merge(tmp_path, monkeypatch)
+    with h5py.File(path) as hf:
+        t = hf["time"][:]
+        bnd = hf["targets/GMAG_BND"][:]
+    i = t.size // 2
+    # the fixture's outboard vertex is R = 2.4 + (0.40 + 0.01 t), exactly linear in t,
+    # so a correct linear interpolation reproduces it to float precision at any t.
+    assert np.isclose(bnd[0, i], 2.4 + 0.40 + 0.01 * t[i], atol=1e-9)
+    assert not np.isclose(np.ptp(np.diff(t)), MODAL), "the axis must not be the native one"
+
+
+def test_dcs_scope_is_interpolated_once_from_its_own_axis(tmp_path, monkeypatch):
+    """No 1 kHz -> 488 Hz -> 500 Hz double hop: merge reads the original sources."""
+    path, dcs_t, ramp = _merge(tmp_path, monkeypatch)
+    with h5py.File(path) as hf:
+        t = hf["time"][:]
+        got = hf["dcs/Ip_scope/ref"][:]
+    assert np.allclose(got, np.interp(t, dcs_t, ramp), atol=1e-9, equal_nan=True)
+
+
+def test_uniform_shot_dropped_when_no_window(tmp_path, monkeypatch):
+    bnd_dir = tmp_path / "g2"; bnd_dir.mkdir()
+    dcs_dir = tmp_path / "d2"; dcs_dir.mkdir()
+    out_dir = tmp_path / "m2"; out_dir.mkdir()
+    _write_gmag(bnd_dir / "998.h5", t0=-30.0, t1=-20.0)     # entirely pre-ignitron
+    (dcs_dir / "DCS_archive_998.mat").write_text("stub")
+    dcs_t = np.arange(-29.5, -20.0, 0.001)
+    monkeypatch.setattr(M, "read_dcs_mat",
+                        lambda p: (dcs_t, {"Ip_scope": (dcs_t * 0, dcs_t * 0)}))
+    shot, ok, err = M._merge_one((998, bnd_dir, dcs_dir, out_dir,
+                                  "uniform", 500.0, 16.0))
+    assert not ok and "uniform window" in err
+    assert not (out_dir / "998.h5").exists(), "a failed merge leaves no partial file"
+
+
+def test_existing_time_bases_still_work(tmp_path, monkeypatch):
+    """The 7-tuple arity change must not break 'gmag' or 'dcs'."""
+    for base in ("gmag", "dcs"):
+        bnd_dir = tmp_path / f"g_{base}"; bnd_dir.mkdir()
+        dcs_dir = tmp_path / f"d_{base}"; dcs_dir.mkdir()
+        out_dir = tmp_path / f"m_{base}"; out_dir.mkdir()
+        _write_gmag(bnd_dir / "997.h5")
+        (dcs_dir / "DCS_archive_997.mat").write_text("stub")
+        dcs_t = np.arange(-29.5, 12.6, 0.001)
+        monkeypatch.setattr(M, "read_dcs_mat",
+                            lambda p: (dcs_t, {"Ip_scope": (dcs_t * 0, dcs_t * 0)}))
+        shot, ok, err = M._merge_one((997, bnd_dir, dcs_dir, out_dir, base, 500.0, 16.0))
+        assert ok, f"{base}: {err}"
+        with h5py.File(out_dir / "997.h5") as hf:
+            assert hf.attrs["grid_source"] == base
+            assert "src_gap_ms" not in hf, "only the uniform base writes provenance"
+
+
+def test_proj_config_exposes_the_v2_dirs():
+    from src.proj_config import get_proj_config
+    cfg = get_proj_config()
+    assert cfg.mergedh5_uni500_dir.name == "MergedH5Uni500"
+    assert cfg.npzuni500_dir.name == "NpzUni500"
+
+
 def _run():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
