@@ -358,7 +358,8 @@ def _build_one(args):
                     gap = g_all[i0:i1 + 1].astype(np.float32)
             # Captured here while the file is open; the return payload below runs
             # after the ``with`` closes, so hf.attrs cannot be read there.
-            grid = (None if "grid_source" not in hf.attrs else {
+            grid = (None if ("grid_source" not in hf.attrs
+                             or not str(hf.attrs["grid_source"]).startswith("uniform")) else {
                 "source": str(hf.attrs["grid_source"]),
                 "hz": float(hf.attrs.get("grid_hz", float("nan"))),
                 "dt_ms": 1e3 * float(hf.attrs.get("grid_dt", float("nan"))),
@@ -428,6 +429,7 @@ def _build_one(args):
             "n_valid": int(valid.sum()),
             "n_fabricated": (0 if gap is None
                              else int((valid & (gap > FAB_GAP_MS)).sum())),
+            "has_src_gap_ms": gap is not None,
             "grid": grid,
             "S_sum": Sv.sum(0), "S_sumsq": (Sv * Sv).sum(0),
             "n_scalar_valid": int(s_valid.sum()),
@@ -535,7 +537,7 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
             "fabricated_valid_slices": int(sum(d.get("n_fabricated", 0) for d in ok)),
             "fabricated_gap_threshold_ms": FAB_GAP_MS,
         }
-    if any("src_gap_ms" in np.load(npz_dir / f"{d['shot']}.npz").files for d in ok[:1]):
+    if ok and ok[0].get("has_src_gap_ms"):
         meta["arrays"]["src_gap_ms"] = ["nt"]
     if "S_mean" in norm:
         meta["norm"]["S_mean"] = np.asarray(norm["S_mean"]).tolist()

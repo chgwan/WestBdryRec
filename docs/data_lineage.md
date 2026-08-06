@@ -372,8 +372,8 @@ python scripts/run_data_pre.py --workers 16
 python -c "from src.data.build_npz import run; run(workers=16)"
 
 # WEST — V2 uniform 500 Hz branch (merge onto the generated lattice, then build NPZ)
-python -c "from src.data.merge_dcs_bdry import run; run(time_base='uniform', uniform_hz=500.0, clip_gap_ms=16.0, workers=16)"
-python -c "from src.data.build_npz import run; run(merged_dir='MergedH5Uni500', npz_dir='NpzUni500', workers=16)"
+python -c "from src.data.merge_dcs_bdry import run; run(merged_dir='ProjDB/datasets/MergedH5Uni500', time_base='uniform', uniform_hz=500.0, clip_gap_ms=16.0, workers=16)"
+python -c "from src.data.build_npz import run; run(merged_dir='ProjDB/datasets/MergedH5Uni500', npz_dir='ProjDB/datasets/NpzUni500', workers=16)"
 
 # IMAS — build the IMAS-native NPZ (no scripts/ runner; importable module)
 python -c "from src.data.build_imas_npz import run; run()"
