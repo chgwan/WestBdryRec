@@ -40,5 +40,9 @@ which needs temporal context to predict well, where the snapshot models cannot.
 |---|---|---|---|---|---|---|---|---|---|
 | m0 | 0.9508 | 0.5416 | 1.7378 | 5.7871 | 4.4174 | 25.3110 | 30.8972 | 76 | 0.9579 / 0.8452 |
 | m1 | 0.9520 | 0.5528 | 1.7164 | 6.9171 | 4.4172 | 22.6088 | 28.4067 | 76 | 0.9530 / 0.8284 |
-| m2 | 0.9856 | 0.8686 | 0.9305 | 6.6229 | 3.8503 | 14.8873 | 17.1015 | 76 | 0.9668 / 0.8763 |
+| **m2** | **0.9856** | **0.8686** | **0.9305** | **6.6229** | **3.8503** | **14.8873** | **17.1015** | **76** | 0.9668 / 0.8763 |
+
+> **Best overall — `dcs_actuator_geom_nope/m2` (bolded):** CCC 0.9856 beats the baseline
+> (0.9668), R² 0.869 matches it (0.876), and it is the only unit under 1 cm RMSE with the
+> lowest centre / absolute-boundary error. This is the recommended deployment config.
 
