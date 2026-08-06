@@ -197,8 +197,8 @@ class DCSSeqDataset(torch.utils.data.Dataset):
 
     Each item is one whole shot: ``(A(L, n_act), Y(L, 32), mask(L,))``. The
     series is not subsampled (the GRU is linear-time). Normalization uses the
-    per-channel mean/std over valid steps; invalid steps are kept (zeroed by
-    ``read_series``) and masked out of the loss by the trainer.
+    per-channel mean/std over valid steps; invalid steps are kept (inputs zeroed by
+    ``read_series``, targets zeroed here) and masked out of the loss by the trainer.
     """
 
     def __init__(self, npz_dir, shots, cfg, ncm, mean, std):
@@ -213,6 +213,11 @@ class DCSSeqDataset(torch.utils.data.Dataset):
             A, mask = read_series(p, cfg, ncm)
             Y = np.load(p)["Y"].astype(np.float32)
             v = mask & np.isfinite(Y).all(1) & np.isfinite(A).all(1)
+            # The trainer masks by multiplication and NaN * 0 = NaN, so a single
+            # filter-rejected slice would make the loss and every gradient NaN. Zero-fill
+            # the target after the mask is computed -- the mask, not the value, is what
+            # excludes the step. Same convention read_series already uses for the inputs.
+            Y = np.nan_to_num(Y, nan=0.0, posinf=0.0, neginf=0.0)
             self.rows.append((A, Y, v))
             n_act = A.shape[1]
         self.n_act = int(n_act) if n_act is not None else 0
