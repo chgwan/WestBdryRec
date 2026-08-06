@@ -155,14 +155,14 @@ def main():
         else:
             train_m2_dcs(npz_dir, art, cfg=cfg, shots=args.shots); _pred_m2(art, npz_dir, test, cfg, ncm, pred)
         sc = _score(npz_dir, pred, train, test)
-        rows.append({"model": mdl, **sc})
+        rows.append({"run": args.run_name or cfg["run"], "model": mdl, **sc})
         print(f"{mdl}: CCC={sc['ccc']:.4f} R2={sc['r2']:.4f} RMSE={sc['rmse_cm']:.2f}cm n_shots={sc['n_shots']}")
 
     out = pathlib.Path(args.bench_out) if args.bench_out else (CFG.stats_dir / "dcs_predictor" / "bench_table.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     write_header = not out.exists()
     with out.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["model", "ccc", "r2", "similarity", "rmse_cm",
+        w = csv.DictWriter(f, fieldnames=["run", "model", "ccc", "r2", "similarity", "rmse_cm",
                                           "ccc_p90", "n_shots", "rgeom_mae_mm",
                                           "zgeom_mae_mm", "centre_rmse_mm",
                                           "abs_bnd_rmse_mm"])
