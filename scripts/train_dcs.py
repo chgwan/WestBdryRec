@@ -16,6 +16,7 @@ from src.ml.dcs_features import (load_dcs_config, load_meta, node_col_map,  # no
                                  read_snapshot, read_series)
 from src.ml.models import ResMLP, ActSeqGRU  # noqa: E402
 from src.ml.predictions import save_predictions  # noqa: E402
+from src.ml.score34 import score_dcs34  # noqa: E402
 from src.ml.train import (train_m0_dcs, train_m1_dcs, train_m2_dcs, _device)  # noqa: E402
 from src.ml.target import N_OUT, destandardize  # noqa: E402
 from src.ml.target import load_target  # noqa: E402
@@ -101,13 +102,16 @@ def _pred_m2(art, npz_dir, shots, cfg, ncm, out):
 
 
 def _score(npz_dir, pred_path, train_shots, test_shots):
-    m = bench.score_predictions(pred_path, str(npz_dir), train_shots, test_shots)
-    psc = m.get("per_shot_ccc") or [np.nan]
-    return {"ccc": m.get("ccc", float("nan")), "r2": m.get("r2", float("nan")),
-            "similarity": m.get("similarity", float("nan")),
-            "rmse_cm": m.get("rmse_cm", float("nan")),
-            "ccc_p90": float(np.nanpercentile(psc, 90)),
-            "n_shots": m.get("n_shots", 0)}
+    meta = load_meta(npz_dir)
+    theta = np.deg2rad(np.asarray(meta["theta_deg"], float))
+    m = score_dcs34(pred_path, str(npz_dir), train_shots, test_shots, theta)
+    if m["n_shots"] == 0:
+        raise SystemExit(f"{pred_path}: scored 0 shots -- refusing to write a bench row")
+    return {"ccc": m["ccc"], "r2": m["r2"], "similarity": m["similarity"],
+            "rmse_cm": m["rmse_cm"], "ccc_p90": m["ccc_p90"], "n_shots": m["n_shots"],
+            "rgeom_mae_mm": m["rgeom_mae_mm"], "zgeom_mae_mm": m["zgeom_mae_mm"],
+            "centre_rmse_mm": m["centre_rmse_mm"],
+            "abs_bnd_rmse_mm": m["abs_bnd_rmse_mm"]}
 
 
 def main():
@@ -158,7 +162,10 @@ def main():
     out.parent.mkdir(parents=True, exist_ok=True)
     write_header = not out.exists()
     with out.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["model", "ccc", "r2", "similarity", "rmse_cm", "ccc_p90", "n_shots"])
+        w = csv.DictWriter(f, fieldnames=["model", "ccc", "r2", "similarity", "rmse_cm",
+                                          "ccc_p90", "n_shots", "rgeom_mae_mm",
+                                          "zgeom_mae_mm", "centre_rmse_mm",
+                                          "abs_bnd_rmse_mm"])
         if write_header:
             w.writeheader()
         w.writerows(rows)
