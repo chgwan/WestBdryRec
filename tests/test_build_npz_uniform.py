@@ -120,6 +120,28 @@ def test_grid_meta_block_is_written(tmp_path):
     assert meta["arrays"]["src_gap_ms"] == ["nt"]
 
 
+GEOM = pathlib.Path("ProjDB/datasets/NpzGeom")
+UNI = pathlib.Path("ProjDB/datasets/NpzUni500")
+
+
+@pytest.mark.skipif(not (GEOM.exists() and UNI.exists()),
+                    reason="needs both built datasets")
+def test_uniform_agrees_with_native_at_coincident_times():
+    """Catches phase and off-by-one errors: where a V2 grid point lands on a native
+    reconstruction timestamp, its Y must match V1's to within resampling noise."""
+    shot = sorted(int(p.stem) for p in UNI.glob("*.npz"))[0]
+    a = np.load(GEOM / f"{shot}.npz")
+    b = np.load(UNI / f"{shot}.npz")
+    ta, tb = a["time"].astype(float), b["time"].astype(float)
+    j = np.searchsorted(ta, tb)
+    j = np.clip(j, 0, ta.size - 1)
+    close = np.abs(ta[j] - tb) < 1e-4                    # coincident to 0.1 ms
+    both = close & b["valid"] & a["valid"][j]
+    assert both.sum() > 100, f"only {both.sum()} coincident valid slices"
+    err = np.abs(b["Y"][both] - a["Y"][j[both]])
+    assert np.median(err) < 5e-3, f"median |dY| = {np.median(err) * 1e3:.2f} mm"
+
+
 def _run():
     import tempfile
     for name, fn in sorted(globals().items()):
