@@ -14,9 +14,11 @@ import yaml
 from ..proj_config import get_proj_config
 
 
-def load_dcs_config():
+def load_dcs_config(path=None):
+    """Load the DCS predictor config; ``path`` overrides ``configs/dcs_model.yml``."""
     cfg = get_proj_config()
-    with open(cfg.base_dir / "configs" / "dcs_model.yml") as f:
+    path = pathlib.Path(path) if path else cfg.base_dir / "configs" / "dcs_model.yml"
+    with open(path) as f:
         return yaml.safe_load(f)
 
 

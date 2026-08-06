@@ -109,10 +109,18 @@ def main():
     ap.add_argument("--shots", type=int, nargs="*", default=None, help="override train pool (tests)")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--bench-out", default=None)
+    ap.add_argument("--npz-dir", default=None,
+                    help="dataset to train on (default: cfg.mergednpz_dir); "
+                         "e.g. ProjDB/datasets/NpzGeom for the filtered rebuild")
+    ap.add_argument("--run-name", default=None,
+                    help="artifact subdir under trains/ (default: cfg['run'])")
+    ap.add_argument("--config", default=None,
+                    help="model config (default: configs/dcs_model.yml); "
+                         "e.g. configs/dcs_model_geom.yml adds the time-PE channels")
     args = ap.parse_args()
 
-    npz_dir = CFG.mergednpz_dir
-    cfg = load_dcs_config()
+    npz_dir = pathlib.Path(args.npz_dir) if args.npz_dir else CFG.mergednpz_dir
+    cfg = load_dcs_config(args.config)
     if args.epochs is not None:
         for k in ("m1", "m2"):
             cfg["hp"][k]["epochs"] = args.epochs
@@ -123,7 +131,7 @@ def main():
         train, _val, test = bench.load_filtered_split(npz_dir)
 
     models = ["m0", "m1", "m2"] if args.model == "all" else [args.model]
-    run_dir = CFG.trains_dir / cfg["run"]
+    run_dir = CFG.trains_dir / (args.run_name or cfg["run"])
     run_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for mdl in models:

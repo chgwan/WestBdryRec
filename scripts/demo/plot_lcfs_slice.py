@@ -7,8 +7,8 @@ sample nearest the requested time:
   * plasma-current gravity center -> inputs/GMAG_BARY   (R, Z) [m]
   * geometric center -> inputs/GMAG_GEOM[0:2] = (Rgeom, Zgeom) [mm -> /1000 -> m]
 
-Left panel marks: reconstruction origin (2.5, 0), GMAG_BARY, (Rgeom, Zgeom).
-Right panel: r(theta) about the fixed origin (the polar target), near-flat edges
+Left panel marks: GMAG_BARY and the polar origin (Rgeom, Zgeom).
+Right panel: r(theta) about (Rgeom, Zgeom) (the polar target), near-flat edges
 in red (折线 / flat-shelf) and the r_min vertex ringed (elongation). Sentinel
 centers (no equilibrium, e.g. breakdown) are detected and omitted with a note.
 
@@ -55,9 +55,13 @@ def plot_lcfs_slice(shot, t, tol=0.005, rmin_floor=0.15, out=None):
     p = CFG.gmagh5_dir / f"{shot}.h5"
     if not p.exists():
         raise SystemExit(f"no GMagH5 for shot {shot}: {p}")
-    meta = json.loads((CFG.mergednpz_dir / "meta.json").read_text())
-    origin = tuple(float(x) for x in meta["origin"])
+    meta = json.loads((CFG.npzgeom_dir / "meta.json").read_text())
     theta = np.deg2rad(np.asarray(meta["theta_deg"], float))
+    # The polar origin is per slice -- (Rgeom, Zgeom) below -- so meta["origin"] is the
+    # string "per_slice_gmag_geom", not a coordinate pair. Do not parse it as one.
+    if meta.get("origin") != "per_slice_gmag_geom":
+        raise SystemExit(f"unexpected meta origin {meta.get('origin')!r}: this plot "
+                         "assumes the per-slice-centre dataset")
 
     with h5py.File(p, "r") as hf:
         bnd_t = np.asarray(hf["targets/GMAG_BND_time"], float).reshape(-1)
@@ -82,6 +86,12 @@ def plot_lcfs_slice(shot, t, tol=0.005, rmin_floor=0.15, out=None):
         bary_RZ = center("GMAG_BARY", "GMAG_BARY_time", scale=1.0)      # already [m]
         geom_RZ = center("GMAG_GEOM", "GMAG_GEOM_time", scale=1e-3)     # [mm] -> [m]
 
+    bary_ok = bary_RZ is not None and _valid_center(*bary_RZ)
+    geom_ok = geom_RZ is not None and _valid_center(*geom_RZ)
+    if not geom_ok:
+        raise SystemExit(f"shot {shot} t={bnd_t[j]:.3f}s has no valid "
+                         "(Rgeom, Zgeom): no polar origin, nothing to project")
+    origin = geom_RZ                       # the per-slice polar origin
     r = radii_on_grid(R, Z, origin, theta)
     if not np.isfinite(r).all():
         print(f"WARNING: shot {shot} t={bnd_t[j]:.4f}s has non-finite r(theta)")
@@ -90,13 +100,10 @@ def plot_lcfs_slice(shot, t, tol=0.005, rmin_floor=0.15, out=None):
     rmin, rmax = float(np.nanmin(r)), float(np.nanmax(r))
     jmin = int(np.nanargmin(r))
 
-    bary_ok = bary_RZ is not None and _valid_center(*bary_RZ)
-    geom_ok = geom_RZ is not None and _valid_center(*geom_RZ)
-
     print(f"shot {shot}  GMagH5 idx={j}  t={bnd_t[j]:.4f}s  (requested {t})")
     print(f"  flat_run={lr}/32   r_min={rmin:.4f}  r_max={rmax:.4f}  "
           f"r_max/r_min={rmax / max(rmin, 1e-9):.3f}")
-    print(f"  origin            = {tuple(round(v, 3) for v in origin)}")
+    print(f"  origin (Rgeom,Zgeom) = {tuple(round(v, 3) for v in origin)}")
     brys = "(sentinel / no equilibrium)" if bary_RZ and not bary_ok else ""
     gmys = "(sentinel / no equilibrium)" if geom_RZ and not geom_ok else ""
     print(f"  GMAG_BARY (R,Z)   = {None if not bary_RZ else tuple(round(v, 3) for v in bary_RZ)}  {brys}")
@@ -110,7 +117,7 @@ def plot_lcfs_slice(shot, t, tol=0.005, rmin_floor=0.15, out=None):
     ax1.scatter(R, Z, s=14, color=BLUE, zorder=3)
     ax1.scatter(*origin, marker="*", s=260, color=RED, zorder=5,
                 edgecolors=INK, linewidths=.4,
-                label=f"origin {tuple(round(v, 2) for v in origin)}")
+                label=f"polar origin (Rgeom,Zgeom) {tuple(round(v, 2) for v in origin)}")
     if bary_ok:
         ax1.scatter(*bary_RZ, marker="s", s=95, color=GREEN, zorder=5,
                     edgecolors=INK, linewidths=.4,
