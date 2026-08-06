@@ -28,7 +28,8 @@ def test_nan_times_zero_poisons_a_multiplicative_mask():
 
 
 def test_seq_dataset_zero_fills_rejected_targets(tmp_path, monkeypatch):
-    from src.ml import train as T
+    from src.ml import dataset as D
+    from src.ml import train as T  # DCSSeqDataset is re-exported here
 
     nt, n_rho, n_act = 8, 32, 3
     Y = np.tile(np.linspace(0.4, 0.6, n_rho), (nt, 1)).astype(np.float32)
@@ -36,7 +37,7 @@ def test_seq_dataset_zero_fills_rejected_targets(tmp_path, monkeypatch):
     A = np.ones((nt, n_act), np.float32)
     mask = np.ones(nt, bool)
 
-    monkeypatch.setattr(T, "read_series", lambda p, cfg, ncm: (A.copy(), mask.copy()))
+    monkeypatch.setattr(D, "read_series", lambda p, cfg, ncm: (A.copy(), mask.copy()))
     p = tmp_path / "1.npz"
     np.savez(p, Y=Y, center=np.zeros((nt, 2), np.float32), valid=mask,
              time=np.arange(nt, dtype=np.float32))

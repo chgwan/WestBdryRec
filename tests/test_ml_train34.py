@@ -21,12 +21,13 @@ def test_models_accept_34_outputs():
 
 
 def test_snapshot_dataset_yields_standardized_34_targets(tmp_path, monkeypatch):
-    from src.ml import train as T
+    from src.ml import dataset as D
+    from src.ml import train as T  # DCSSnapshotDataset is re-exported here
 
     nt, n_feat = 10, 6
     feats = np.random.default_rng(0).normal(size=(nt, n_feat)).astype(np.float32)
     mask = np.ones(nt, bool)
-    monkeypatch.setattr(T, "read_snapshot", lambda p, cfg, ncm: (feats.copy(), mask.copy()))
+    monkeypatch.setattr(D, "read_snapshot", lambda p, cfg, ncm: (feats.copy(), mask.copy()))
 
     Y = np.tile(np.linspace(0.4, 0.6, 32), (nt, 1)).astype(np.float32)
     C = np.column_stack([np.full(nt, 2.44), np.full(nt, -0.02)]).astype(np.float32)

@@ -3,7 +3,9 @@
 """Feature engineering + torch datasets for the actuator-predictor models.
 
 ``engineer(h5_path)`` builds the M0 snapshot (raw actuators + derived features).
-``SnapshotDataset`` / ``SeqDataset`` wrap shots into torch datasets for M1/M2.
+All torch datasets live here: ``SnapshotDataset`` / ``SeqDataset`` (IMAS T0 H5 +
+NPZ target) and ``DCSSnapshotDataset`` / ``DCSSeqDataset`` (strict-actuator NPZ,
+34 outputs) for M1/M2.
 
 The raw actuator names (RAW) and derived feature config are read from
 configs/m0_model.yml (single source of truth, no hardcoded names).
@@ -19,6 +21,8 @@ from torch.utils.data import Dataset
 
 from ..proj_config import get_proj_config
 from ..data.imas_flat_top import flat_top_window
+from .dcs_features import read_snapshot, read_series
+from .target import load_target, standardize
 
 
 # ── Feature engineering (M0 snapshot from raw actuators) ─────────────
@@ -88,7 +92,7 @@ def engineer(h5_path):
     return feats, valid
 
 
-# ── Torch datasets (M1 snapshot, M2 sequence) ────────────────────────
+# ── IMAS T0 torch datasets (M1 snapshot, M2 sequence) ────────────────
 
 def keep_mask(std):
     """Boolean column mask selecting std > 0 (drops constant features)."""
@@ -170,3 +174,86 @@ class SeqDataset(Dataset):
         A = (A - self.mean) / self.std
         return (torch.from_numpy(A), torch.from_numpy(Y),
                 torch.from_numpy(m.astype(np.float32)))
+
+
+# ── DCS strict-actuator torch datasets (M1 snapshot, M2 sequence) ─────
+
+class DCSSnapshotDataset(Dataset):
+    """Per-slice (engineered strict-actuator snapshot -> rho) over a shot set."""
+
+    def __init__(self, npz_dir, shots, cfg, ncm, mean, std, max_per_shot=None,
+                 tgt_mean=None, tgt_std=None):
+        self.keep = np.asarray(std, float) > 0
+        self.mean = np.asarray(mean, float)[self.keep]
+        self.std = np.asarray(std, float)[self.keep]
+        self.tgt_mean = None if tgt_mean is None else np.asarray(tgt_mean, float)
+        self.tgt_std = None if tgt_std is None else np.asarray(tgt_std, float)
+        self.rows = []
+        rng = np.random.default_rng(0)
+        mps = max_per_shot if max_per_shot is not None else cfg.get("max_per_shot")
+        for s in shots:
+            p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+            if not p.exists():
+                continue
+            feats, mask = read_snapshot(p, cfg, ncm)
+            T_all, finite = load_target(p)
+            if self.tgt_mean is not None:
+                T_all = standardize(T_all, self.tgt_mean, self.tgt_std)
+            v = mask & finite & np.isfinite(feats).all(1)
+            idx = np.where(v)[0]
+            if mps and idx.size > mps:
+                idx = np.sort(rng.choice(idx, mps, replace=False))
+            Xk = feats[:, self.keep]
+            for i in idx:
+                self.rows.append((Xk[i], T_all[i].astype(np.float32)))
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, i):
+        x, y = self.rows[i]
+        x = (x - self.mean) / self.std
+        return torch.from_numpy(x.astype(np.float32)), torch.from_numpy(y)
+
+
+class DCSSeqDataset(Dataset):
+    """Per-shot full actuator series (n_act -> 34 outputs (rho + centre)) over a shot set.
+
+    Each item is one whole shot: ``(A(L, n_act), Y(L, 34), mask(L,))``. The
+    series is not subsampled (the GRU is linear-time). Normalization uses the
+    per-channel mean/std over valid steps; invalid steps are kept (inputs zeroed by
+    ``read_series``, targets zeroed here) and masked out of the loss by the trainer.
+    """
+
+    def __init__(self, npz_dir, shots, cfg, ncm, mean, std,
+                 tgt_mean=None, tgt_std=None):
+        self.mean = np.asarray(mean, float)
+        self.std = np.maximum(np.asarray(std, float), 1e-6)
+        self.tgt_mean = None if tgt_mean is None else np.asarray(tgt_mean, float)
+        self.tgt_std = None if tgt_std is None else np.asarray(tgt_std, float)
+        self.rows = []
+        n_act = None
+        for s in shots:
+            p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+            if not p.exists():
+                continue
+            A, mask = read_series(p, cfg, ncm)
+            T_all, finite = load_target(p)
+            if self.tgt_mean is not None:
+                T_all = standardize(T_all, self.tgt_mean, self.tgt_std)
+            v = mask & finite & np.isfinite(A).all(1)
+            # zero-fill AFTER masking: the trainer multiplies by the mask and
+            # NaN * 0 = NaN, which would make the loss and every gradient NaN.
+            T_all = np.nan_to_num(T_all, nan=0.0, posinf=0.0, neginf=0.0)
+            self.rows.append((A, T_all.astype(np.float32), v))
+            n_act = A.shape[1]
+        self.n_act = int(n_act) if n_act is not None else 0
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __getitem__(self, i):
+        A, Y, m = self.rows[i]
+        A = ((A - self.mean) / self.std).astype(np.float32)
+        return (torch.from_numpy(A), torch.from_numpy(Y),
+                torch.from_numpy(m))
