@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-from src.data.merge_dcs_bdry import uniform_grid  # noqa: E402
+from src.data.merge_dcs_bdry import native_gap_on_grid, uniform_grid  # noqa: E402
 
 DT = 0.002
 MODAL = 0.002048          # the native GMAG_BND cadence
@@ -89,6 +89,32 @@ def test_empty_grid_when_nothing_usable():
     assert grid.size == 0, "an all-negative record yields no grid; caller drops the shot"
     grid, _ = uniform_grid(np.array([1.0]), np.arange(0.0, 2.0, 0.001))
     assert grid.size == 0
+
+
+def test_gap_is_the_bracketing_native_spacing():
+    """Half-open convention: a grid point in [ts[j], ts[j+1]) reports that interval."""
+    ts = np.array([0.0, 0.002, 0.004, 0.040])       # a 36 ms dropout after 0.004
+    grid = np.array([0.001, 0.003, 0.010, 0.030])
+    gap = native_gap_on_grid(grid, ts)
+    assert np.allclose(gap, [2.0, 2.0, 36.0, 36.0])
+
+
+def test_gap_reads_the_modal_cadence_inside_a_normal_run():
+    bnd = _native(0.0, 4.0)
+    grid = np.arange(0, 1500) * DT
+    gap = native_gap_on_grid(grid, bnd)
+    assert np.allclose(gap, MODAL * 1e3), "normal cadence must read ~2.048 ms"
+
+
+def test_gap_handles_a_degenerate_axis():
+    gap = native_gap_on_grid(np.array([0.0, 0.002]), np.array([1.0]))
+    assert gap.shape == (2,) and np.isnan(gap).all()
+
+
+def test_gap_is_finite_at_and_beyond_the_native_edges():
+    ts = np.array([0.0, 0.002, 0.004])
+    gap = native_gap_on_grid(np.array([-0.5, 0.0, 0.004, 9.0]), ts)
+    assert np.all(np.isfinite(gap)), "edge points clamp to the nearest interval"
 
 
 def _run():

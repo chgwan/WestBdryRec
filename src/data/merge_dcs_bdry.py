@@ -137,6 +137,26 @@ def uniform_grid(bnd_t, dcs_t, hz=500.0, clip_gap_ms=16.0, t_min=0.0):
     return grid, info
 
 
+def native_gap_on_grid(grid, bnd_t):
+    """Spacing [ms] of the two native ``bnd_t`` samples bracketing each grid point.
+
+    Half-open convention: a grid point in ``[ts[j], ts[j+1])`` reports
+    ``ts[j+1] - ts[j]``; points at or beyond either edge clamp to the nearest
+    interval, so the result is always finite for an axis of >= 2 samples.
+
+    Read this as provenance, not as validity: ~2.048 ms means the point sits inside
+    the normal reconstruction cadence, a larger value means it was interpolated
+    across a dropout of that width. Validity stays entirely S0-S5's decision.
+    """
+    grid = np.asarray(grid, float).reshape(-1)
+    ts = np.unique(np.asarray(bnd_t, float).reshape(-1))
+    if ts.size < 2:
+        return np.full(grid.size, np.nan)
+    gaps = np.diff(ts) * 1e3
+    idx = np.clip(np.searchsorted(ts, grid, side="right") - 1, 0, gaps.size - 1)
+    return gaps[idx]
+
+
 def load_selected_shots(status_csv, flat_top_csv, min_s):
     """Shots passing all criteria (nonzero bnd, fs > 400 Hz, DCS ok, flat-top long enough)."""
     ss = pd.read_csv(status_csv)
