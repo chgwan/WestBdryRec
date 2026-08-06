@@ -221,6 +221,12 @@ Consumers must opt in — `train_dcs.py --npz-dir ProjDB/datasets/NpzGeom
 only reach the model because `dcs_model_geom.yml` lists them; `dcs_features` selects
 columns by node name, so an unlisted column is silently ignored.
 
+Retrain results (runs A and B, three models each): [`newtrain_results.md`](newtrain_results.md).
+Headline: M2-GRU without the time PE beats the `NpzOrigin` baseline on CCC (0.9856 vs
+0.9668) while matching it on R² (0.869 vs 0.876) and additionally predicting the polar
+centre (abs-boundary RMSE 17 mm). The time-PE ablation showed the PE hurts every model,
+so `dcs_actuator_geom_nope` is the recommended configuration.
+
 ---
 
 ## 5. IMAS stages
