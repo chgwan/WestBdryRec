@@ -51,19 +51,15 @@ Dataset: NpzGeom — native GMAG_BND time base (V1)
 | m1 | 0.9520 | 0.5528 | 1.7164 | 6.9171 | 4.4172 | 22.6088 | 28.4067 | 76 | 0.9530 / 0.8284 |
 | **m2** | **0.9856** | **0.8686** | **0.9305** | **6.6229** | **3.8503** | **14.8873** | **17.1015** | **76** | 0.9668 / 0.8763 |
 
-> **Best overall — `dcs_actuator_geom_nope/m2` (bolded):** CCC 0.9856 beats the baseline
-> (0.9668), R² 0.869 matches it (0.876), and it is the only unit under 1 cm RMSE with the
-> lowest centre / absolute-boundary error. This is the recommended deployment config.
-
 ## dcs_actuator_uni500 — with time PE
 
 Dataset: NpzUni500 — uniform 500 Hz lattice, target interpolated (V2)
 
 | model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |
 |---|---|---|---|---|---|---|---|---|---|
-| m0 | not run | | | | | | | | 0.9579 / 0.8452 |
-| m1 | not run | | | | | | | | 0.9530 / 0.8284 |
-| m2 | not run | | | | | | | | 0.9668 / 0.8763 |
+| m0 | 0.9397 | 0.4635 | 1.9316 | 5.7946 | 4.1010 | 21.5704 | 29.0215 | 76 | 0.9579 / 0.8452 |
+| m1 | 0.9472 | 0.5308 | 1.8063 | 7.7272 | 5.4941 | 26.5238 | 32.2139 | 76 | 0.9530 / 0.8284 |
+| m2 | 0.9667 | 0.7082 | 1.4245 | 6.6576 | 3.7467 | 16.8218 | 21.7883 | 76 | 0.9668 / 0.8763 |
 
 ## dcs_actuator_uni500_nope — no time PE
 
@@ -71,7 +67,19 @@ Dataset: NpzUni500 — uniform 500 Hz lattice, target interpolated (V2)
 
 | model | CCC | R² | RMSE cm | Rgeom MAE mm | Zgeom MAE mm | centre RMSE mm | abs bnd RMSE mm | n | baseline CCC / R² |
 |---|---|---|---|---|---|---|---|---|---|
-| m0 | not run | | | | | | | | 0.9579 / 0.8452 |
-| m1 | not run | | | | | | | | 0.9530 / 0.8284 |
-| m2 | not run | | | | | | | | 0.9668 / 0.8763 |
+| m0 | 0.9387 | 0.4534 | 1.9497 | 5.8680 | 4.2673 | 23.7136 | 30.9354 | 76 | 0.9579 / 0.8452 |
+| m1 | 0.9397 | 0.4618 | 1.9347 | 6.9040 | 4.3727 | 20.8347 | 28.4212 | 76 | 0.9530 / 0.8284 |
+| m2 | 0.9716 | 0.7524 | 1.3121 | 6.5285 | 3.4625 | 15.8720 | 19.9744 | 76 | 0.9668 / 0.8763 |
+
+> **Best overall — `dcs_actuator_geom_nope/m2` (bolded above):** CCC 0.9856 beats the baseline
+> (0.9668), R² 0.869 matches it (0.876), and it is the only unit under 1 cm RMSE with the
+> lowest centre / absolute-boundary error. This is the recommended deployment config.
+
+> **V2 (`NpzUni500`, uniform 500 Hz) — negative result.** Interpolating the target onto a
+> uniform lattice was meant to fix M2-GRU's unequal-step problem, but it hurt every model.
+> On the model that mattered: `uni500_nope/m2` CCC 0.9716 vs `geom_nope/m2` 0.9856 (−0.014),
+> R² 0.752 vs 0.869, abs-boundary 20.0 vs 17.1 mm. The cost of training on fabricated
+> (interpolated) boundaries outweighed the uniform-step benefit — the unequal-step hypothesis
+> is falsified. V1's native-axis `geom_nope/m2` remains best; `NpzGeom` stays the recommended
+> dataset. The V2 branch is retained as the controlled comparison.
 
