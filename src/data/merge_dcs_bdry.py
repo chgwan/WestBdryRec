@@ -72,6 +72,71 @@ def resample_to_grid(grid, ts, values):
     return out
 
 
+def uniform_grid(bnd_t, dcs_t, hz=500.0, clip_gap_ms=16.0, t_min=0.0):
+    """Uniform lattice ``t_k = k / hz`` over the usable window, plus an audit dict.
+
+    V2's whole point is that this axis is *generated*, not taken from data: the
+    native ``GMAG_BND_time`` is non-uniform (2.048 ms is only the modal step, with
+    dropouts to ~33 ms and 0 of 1346 shots uniformly sampled), which a step-indexed
+    GRU silently misreads as equal spacing.
+
+    The window is the **longest contiguous run** of ``bnd_t`` samples whose
+    consecutive spacing is <= ``clip_gap_ms``, intersected with the DCS span and with
+    ``t >= t_min``. Longest-run rather than first-gap, and 16 ms rather than ~2x the
+    modal step, both matter: shot 57295 carries an isolated 7.179 ms interval at
+    t=0.089 s inside its fast window, and a 4.1 ms first-gap rule truncates it to 45
+    grid points. 16 ms sits between the 2.048 ms cadence and the 32.768 ms idle
+    tier, so only the idle tier and genuine long dropouts terminate the grid.
+
+    Measured on the 759 selected shots this clip removes nothing (0 of 7 302 943
+    samples at t >= 0): ``t >= 0`` and the DCS span already bound the grid inside the
+    fast-acquisition window. It is kept as a guard for a future campaign or a
+    different ``hz``, and ``clip_dropped_*`` turn "it never fires" into a
+    per-build measurement rather than an assumption.
+
+    Returns ``(grid, info)``. ``grid`` is empty when no usable window survives --
+    the caller drops that shot.
+    """
+    dt = 1.0 / float(hz)
+    info = {"grid_hz": float(hz), "grid_dt": dt, "grid_k0": 0, "grid_n": 0,
+            "clip_gap_ms": float(clip_gap_ms), "clip_t_start": float("nan"),
+            "clip_t_end": float("nan"), "clip_dropped_n": 0, "clip_dropped_s": 0.0}
+    # np.unique sorts and de-duplicates: 27 of the 759 shots carry a non-increasing
+    # GMAG timestamp (sub-ms jitter), which would make np.diff-based gaps meaningless.
+    ts = np.unique(np.asarray(bnd_t, float).reshape(-1))
+    dcs_t = np.asarray(dcs_t, float).reshape(-1)
+    if ts.size < 2 or dcs_t.size < 2:
+        return np.empty(0), info
+
+    brk = np.where(np.diff(ts) > clip_gap_ms / 1000.0)[0]
+    starts = np.r_[0, brk + 1]
+    stops = np.r_[brk, ts.size - 1]
+    lo = np.maximum(ts[starts], max(float(t_min), float(dcs_t.min())))
+    hi = np.minimum(ts[stops], float(dcs_t.max()))
+    dur = np.where(hi > lo, hi - lo, -1.0)
+    if not np.any(dur > 0):
+        return np.empty(0), info
+    j = int(np.argmax(dur))
+    t_lo, t_hi = float(lo[j]), float(hi[j])
+
+    # eps guards the lattice arithmetic: t_lo/dt for a t_lo already on the lattice
+    # can land a hair above the integer and push ceil() one step too far.
+    k0 = int(np.ceil(t_lo / dt - 1e-9))
+    k1 = int(np.floor(t_hi / dt + 1e-9))
+    if k1 < k0:
+        return np.empty(0), info
+    grid = np.arange(k0, k1 + 1, dtype=float) * dt
+
+    in_win = (ts >= t_lo) & (ts <= t_hi)
+    pos = ts >= t_min
+    pos_ptp = (ts[pos].max() - ts[pos].min()) if pos.any() else 0.0
+    info.update(grid_k0=k0, grid_n=int(grid.size),
+                clip_t_start=t_lo, clip_t_end=t_hi,
+                clip_dropped_n=int(pos.sum() - (in_win & pos).sum()),
+                clip_dropped_s=float(max(0.0, pos_ptp - (t_hi - t_lo))))
+    return grid, info
+
+
 def load_selected_shots(status_csv, flat_top_csv, min_s):
     """Shots passing all criteria (nonzero bnd, fs > 400 Hz, DCS ok, flat-top long enough)."""
     ss = pd.read_csv(status_csv)
