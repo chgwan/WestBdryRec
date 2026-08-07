@@ -169,6 +169,9 @@ def main():
     ap.add_argument("--pe", default=None,
                     help="M3 positional-encoding variant; overrides hp.m3.pe "
                          "(rope_idx | rope_time | upe_idx | upe_time | upe_both)")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="training seed: weight init, shuffle and dropout. Does NOT "
+                         "change the train/val/test split (pinned at split seed 0).")
     ap.add_argument("--bench-out", default=None)
     ap.add_argument("--npz-dir", default=None,
                     help="dataset to train on (default: cfg.mergednpz_dir); "
@@ -204,19 +207,23 @@ def main():
         elif mdl == "m1":
             train_m1_dcs(npz_dir, art, cfg=cfg, shots=args.shots); _pred_m1(art, npz_dir, test, cfg, ncm, pred)
         elif mdl == "m2":
-            train_m2_dcs(npz_dir, art, cfg=cfg, shots=args.shots); _pred_m2(art, npz_dir, test, cfg, ncm, pred)
+            train_m2_dcs(npz_dir, art, cfg=cfg, shots=args.shots, seed=args.seed)
+            _pred_m2(art, npz_dir, test, cfg, ncm, pred)
         elif mdl == "m3":
-            train_m3_dcs(npz_dir, art, cfg=cfg, shots=args.shots, pe=args.pe)
+            train_m3_dcs(npz_dir, art, cfg=cfg, shots=args.shots, pe=args.pe,
+                         seed=args.seed)
             _pred_m3(art, npz_dir, test, cfg, ncm, pred)
         sc = _score(npz_dir, pred, train, test)
-        rows.append({"run": args.run_name or cfg["run"], "model": mdl, **sc})
+        rows.append({"run": args.run_name or cfg["run"], "model": mdl,
+                     "seed": args.seed, **sc})
         print(f"{mdl}: CCC={sc['ccc']:.4f} R2={sc['r2']:.4f} RMSE={sc['rmse_cm']:.2f}cm n_shots={sc['n_shots']}")
 
     out = pathlib.Path(args.bench_out) if args.bench_out else (CFG.stats_dir / "dcs_predictor" / "bench_table.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     write_header = not out.exists()
     with out.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["run", "model", "ccc", "r2", "similarity", "rmse_cm",
+        w = csv.DictWriter(f, fieldnames=["run", "model", "seed", "ccc", "r2",
+                                          "similarity", "rmse_cm",
                                           "ccc_p90", "n_shots", "rgeom_mae_mm",
                                           "zgeom_mae_mm", "centre_rmse_mm",
                                           "abs_bnd_rmse_mm"])
