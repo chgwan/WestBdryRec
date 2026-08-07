@@ -25,9 +25,10 @@ from src.ml.pos_encoding import (  # noqa: E402
 
 def _uniform(nt=512, c=2.048e-3, t0=0.0533):
     """A perfectly uniform axis, with the nonzero time[0] every real shot has."""
-    t = t0 + c * np.arange(nt, dtype=np.float64)
-    ipos = t / c                                     # ignitron-anchored index
-    tpos = t / c                                     # ignitron-anchored time
+    n0 = round(t0 / c)
+    t = n0 * c + c * np.arange(nt, dtype=np.float64)   # t0 snapped to integer*c
+    ipos = n0 + np.arange(nt, dtype=np.float64)         # integer-counting path
+    tpos = t / c                                         # time-division path
     return t, ipos, tpos, c
 
 
