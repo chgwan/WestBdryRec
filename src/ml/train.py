@@ -200,9 +200,16 @@ def _gru_forward(model, A, mk):
         return out
 
 
-def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
-    """Train ActSeqGRU on the DCS actuator series with masked MSE; val early-stop."""
+def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None, seed=0):
+    """Train ActSeqGRU on the DCS actuator series with masked MSE; val early-stop.
+
+    ``seed`` controls weight init, shuffle order and dropout ONLY. It never reaches
+    the train/val/test split, which stays pinned at split seed 0 -- varying it would
+    change the test set and void comparability with every published number.
+    """
     cfg = cfg or load_dcs_config()
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     npz_dir = pathlib.Path(npz_dir)
     if shots is None:
         train, val, _ = bench.load_filtered_split(npz_dir)
@@ -220,9 +227,11 @@ def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
                       layers=hpm["layers"], dropout=hpm["dropout"]).to(_device())
     opt = torch.optim.AdamW(model.parameters(), lr=hpm["lr"], weight_decay=1e-5)
     best, best_state, bad = 1e9, None, 0
+    _g2 = torch.Generator()
+    _g2.manual_seed(seed)
     for ep in range(hpm["epochs"]):
         model.train()
-        for A, Y, m in DataLoader(ds_tr, batch_size=1, shuffle=True):
+        for A, Y, m in DataLoader(ds_tr, batch_size=1, shuffle=True, generator=_g2):
             A = A.to(_device()).float(); Y = Y.to(_device()).float()
             mk = m.to(_device()).bool()
             pred = _gru_forward(model, A, mk)
@@ -248,9 +257,11 @@ def train_m2_dcs(npz_dir, out_path, cfg=None, shots=None):
     out_path = pathlib.Path(out_path); out_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"state": model.state_dict(), "n_act": ds_tr.n_act, "hp": hpm,
                 "mean": mean, "std": std,
-                "tgt_mean": tgt_mean, "tgt_std": tgt_std, "n_out": N_OUT}, out_path)
+                "tgt_mean": tgt_mean, "tgt_std": tgt_std, "n_out": N_OUT,
+                # the multi-seed study reads both back per run
+                "best_val_mse": float(best), "seed": int(seed)}, out_path)
     model.best_val_mse = float(best)
-    return {"best_val_mse": float(best), "n_act": ds_tr.n_act}
+    return {"best_val_mse": float(best), "n_act": ds_tr.n_act, "seed": int(seed)}
 
 
 def _device():
@@ -488,14 +499,18 @@ def train_m2_imas(h5_dir, npz_dir, out_path, hp, raw_names, shots=None):
     return {"best_val_mse": float(best), "n_act": n_act}
 
 
-def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None):
+def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None, seed=0):
     """Train ActSeqAttn on fixed-length windows of the DCS actuator series.
 
     Its own loop, modelled on :func:`train_m2_dcs`: :func:`train_neural` cannot be
     reused because its loader contract is ``(xb, yb)`` with an unmasked ``.mean()``
     loss, and every step here is masked. Only the cosine/warm-up formula is shared.
+
+    ``seed`` controls weight init, shuffle order and dropout ONLY -- never the split.
     """
     cfg = cfg or load_dcs_config()
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     npz_dir = pathlib.Path(npz_dir)
     hpm = cfg["hp"]["m3"]
     pe = pe or hpm["pe"]
@@ -516,7 +531,9 @@ def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None):
                        heads=hpm["heads"], depth=hpm["depth"], ffn=hpm["ffn"],
                        dropout=hpm["dropout"], pe=pe).to(dev)
     coll = functools.partial(pad_collate, w=hpm["window"])
-    dl_tr = DataLoader(ds_tr, batch_size=hpm["batch"], shuffle=True,
+    _g = torch.Generator()
+    _g.manual_seed(seed)
+    dl_tr = DataLoader(ds_tr, batch_size=hpm["batch"], shuffle=True, generator=_g,
                        collate_fn=coll, num_workers=4, persistent_workers=True)
     dl_va = DataLoader(ds_va, batch_size=hpm["batch"], collate_fn=coll,
                        num_workers=4, persistent_workers=True)
@@ -562,10 +579,10 @@ def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None):
     torch.save({"state": model.state_dict(), "n_act": ds_tr.n_act, "hp": hpm,
                 "pe": pe, "mean": mean, "std": std, "tgt_mean": tgt_mean,
                 "tgt_std": tgt_std, "n_out": N_OUT,
-                # Task 8's P3 picks "best rope" / "best upe" by VAL mse, read back
-                # from this artifact -- never by test score. Must be persisted.
-                "best_val_mse": float(best)}, out_path)
+                # read back per run by the multi-seed analysis
+                "best_val_mse": float(best), "seed": int(seed)}, out_path)
     model.best_val_mse = float(best)
     return {"best_val_mse": float(best), "n_act": ds_tr.n_act, "pe": pe,
             "n_windows_train": len(ds_tr),
-            "n_params": int(sum(q.numel() for q in model.parameters()))}
+            "n_params": int(sum(q.numel() for q in model.parameters())),
+            "seed": int(seed)}
