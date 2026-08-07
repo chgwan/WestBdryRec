@@ -53,6 +53,11 @@ class ProjConfig(BaseSettings):
         return self.proj_db_dir / "datasets" / "NpzGeom"
 
     @property
+    def npzgeom_dt_dir(self) -> pathlib.Path:
+        """NpzGeom + the optional Δt column (dt ablation)."""
+        return self.proj_db_dir / "datasets" / "NpzGeomDt"
+
+    @property
     def mergedh5_uni500_dir(self) -> pathlib.Path:
         """Merged H5 on the uniform 500 Hz lattice (newTrain V2)."""
         return self.proj_db_dir / "datasets" / "MergedH5Uni500"

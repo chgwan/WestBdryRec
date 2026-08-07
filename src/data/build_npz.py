@@ -172,6 +172,27 @@ def time_encoding_names(pairs=PE_PAIRS, base=PE_BASE):
     return names
 
 
+def time_gap_column(time):
+    """Per-step sample spacing Δt [s] as a single (nt, 1) column.
+
+    Δt[i] = time[i] - time[i-1]; Δt[0] = time[1] - time[0] (step 0 is masked out of
+    the loss on the plasma phase anyway). This is the time feature the dt ablation
+    injects INSTEAD of the absolute-time PE: it encodes spacing (the variable-rate
+    signal), not discharge clock. Written raw; the trainer standardizes it like every
+    other column. Irrelevant for uniform axes (Δt ≡ const) — NpzGeom is the target.
+    """
+    t = np.asarray(time, float).reshape(-1)
+    if t.size < 2:
+        return np.zeros((t.size, 1), np.float32)
+    dt = np.empty(t.size, np.float32)
+    dt[0] = t[1] - t[0]
+    dt[1:] = np.diff(t)
+    return dt.reshape(-1, 1)
+
+
+DT_NODE = "dt_gap_s"
+
+
 def read_center(hf, nt):
     """``(2, nt)`` plasma geometric center ``(Rgeom, Zgeom)`` in **metres**.
 
@@ -325,7 +346,10 @@ def theta_grid(n_angles=N_ANGLES):
 
 def _build_one(args):
     """Worker: build one ProjDB/Npz/<shot>.npz. Returns (shot, ok, payload|err)."""
-    shot, merged_dir, npz_dir, channels, theta = args
+    # ``add_dt`` is optional: the 5-tuple callers (regression tests, pre-dt scripts)
+    # default it to False so existing builds stay byte-identical.
+    shot, merged_dir, npz_dir, channels, theta = args[:5]
+    add_dt = args[5] if len(args) > 5 else False
     src = pathlib.Path(merged_dir) / f"{shot}.h5"
     out = pathlib.Path(npz_dir) / f"{shot}.npz"
     try:
@@ -373,13 +397,15 @@ def _build_one(args):
             # then the time positional encoding appended on the right.
             # Absent / short channels are kept as NaN (faithful); nothing is imputed.
             n_ch = len(channels)
-            F = n_ch + 2 * PE_PAIRS
+            F = n_ch + 2 * PE_PAIRS + (1 if add_dt else 0)
             X = np.full((nt, F), np.nan, np.float32)
             for k, (_inp, ds_path, _node) in enumerate(channels):
                 ch = _read_channel(hf, ds_path, i0, i1)
                 if ch is not None and ch.shape == (nt,):
                     X[:, k] = ch.astype(np.float32)
-            X[:, n_ch:] = time_encoding(time)
+            X[:, n_ch:n_ch + 2 * PE_PAIRS] = time_encoding(time)
+            if add_dt:
+                X[:, n_ch + 2 * PE_PAIRS:] = time_gap_column(time)
 
             g = bnd[:, i0:i1 + 1].reshape(N_POINTS, 2, nt)          # [pt,(R,Z),t]
             R = g[:, 0, :]
@@ -441,11 +467,15 @@ def _build_one(args):
 
 
 def run(merged_dir=None, npz_dir=None, config_path=None,
-        n_angles=N_ANGLES, workers=1):
+        n_angles=N_ANGLES, workers=1, add_dt=False):
     """Build ProjDB/Npz/<shot>.npz for every Merged shot + write meta.json.
 
     Inputs come from ``configs/base.yml`` (``data.input_list`` -> actuator/
     diagnostic scope traces). Target is always ``targets/GMAG_BND``.
+
+    ``add_dt=True`` appends a per-step Δt (sample-spacing) column to ``X`` as the
+    last feature, recorded in meta under the ``time_gap`` input group (node
+    ``dt_gap_s``). Default ``False`` keeps the build byte-identical to NpzGeom.
     """
     cfg = get_proj_config()
     merged_dir = pathlib.Path(merged_dir) if merged_dir else cfg.mergedh5_dir
@@ -460,9 +490,13 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
     layout = layout + [{"input_name": "time_pe", "channels": len(pe_names),
                         "cols": [n_ch, n_ch + len(pe_names)],
                         "nodes": pe_names, "unit": ""}]
-    F = n_ch + len(pe_names)
+    F = n_ch + len(pe_names) + (1 if add_dt else 0)
+    if add_dt:
+        layout = layout + [{"input_name": "time_gap", "channels": 1,
+                            "cols": [F - 1, F], "nodes": [DT_NODE], "unit": "s"}]
     theta = theta_grid(n_angles)
-    print(f"inputs ({F} channels = {n_ch} scope + {len(pe_names)} time-PE): "
+    dt_tag = " + 1 dt_gap_s" if add_dt else ""
+    print(f"inputs ({F} channels = {n_ch} scope + {len(pe_names)} time-PE{dt_tag}): "
           + ", ".join(f"{k}={len(v)}" for k, v in node_map.items()))
 
     if npz_dir.exists():
@@ -470,7 +504,7 @@ def run(merged_dir=None, npz_dir=None, config_path=None,
     npz_dir.mkdir(parents=True, exist_ok=True)
 
     shots = sorted(int(p.stem) for p in merged_dir.glob("*.h5"))
-    items = [(s, merged_dir, npz_dir, channels, theta)
+    items = [(s, merged_dir, npz_dir, channels, theta, add_dt)
              for s in shots]
     results = pmap(_build_one, items, workers, "build_npz")
 
