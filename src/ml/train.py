@@ -9,6 +9,7 @@ early-stops on val MSE. ``predict_dump_snapshot`` / ``predict_dump_seq`` run a
 trained neural model over the test shots and dump per-slice predictions.
 """
 import copy
+import functools
 import math
 import pathlib
 
@@ -23,10 +24,11 @@ from torch.utils.data import DataLoader
 from . import bench
 from .dataset import engineer, FEATURE_ORDER, keep_mask
 from .dataset import SnapshotDataset, SeqDataset, DCSSnapshotDataset, DCSSeqDataset
+from .dataset import DCSWindowDataset, pad_collate          # NEW
 from .dcs_features import load_dcs_config, load_meta, node_col_map, read_snapshot, read_series
 from .metrics import ccc
 from .target import N_OUT, load_target, standardize, target_mean_std
-from .models import ResMLP, ActSeqGRU
+from .models import ResMLP, ActSeqGRU, ActSeqAttn
 from .predictions import save_predictions
 from .split import split_shots_3
 
@@ -484,3 +486,86 @@ def train_m2_imas(h5_dir, npz_dir, out_path, hp, raw_names, shots=None):
                 "mean": np.asarray(mean, float), "std": np.asarray(std, float)}, out_path)
     model.best_val_mse = float(best)
     return {"best_val_mse": float(best), "n_act": n_act}
+
+
+def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None):
+    """Train ActSeqAttn on fixed-length windows of the DCS actuator series.
+
+    Its own loop, modelled on :func:`train_m2_dcs`: :func:`train_neural` cannot be
+    reused because its loader contract is ``(xb, yb)`` with an unmasked ``.mean()``
+    loss, and every step here is masked. Only the cosine/warm-up formula is shared.
+    """
+    cfg = cfg or load_dcs_config()
+    npz_dir = pathlib.Path(npz_dir)
+    hpm = cfg["hp"]["m3"]
+    pe = pe or hpm["pe"]
+    if shots is None:
+        train, val, _ = bench.load_filtered_split(npz_dir)
+    else:
+        train, val = split_shots_3(list(shots))[:2]
+    ncm = node_col_map(load_meta(npz_dir))
+    mean, std = _dcs_series_mean_std(npz_dir, train, cfg, ncm)
+    tgt_mean, tgt_std = target_mean_std(npz_dir, train)
+    kw = dict(cfg=cfg, ncm=ncm, mean=mean, std=std, pe=pe,
+              d_model=hpm["d_model"], w=hpm["window"], ctx=hpm["ctx"],
+              tgt_mean=tgt_mean, tgt_std=tgt_std)
+    ds_tr = DCSWindowDataset(npz_dir, train, **kw)
+    ds_va = DCSWindowDataset(npz_dir, val, **kw)
+    dev = _device()
+    model = ActSeqAttn(n_act=ds_tr.n_act, n_out=N_OUT, d=hpm["d_model"],
+                       heads=hpm["heads"], depth=hpm["depth"], ffn=hpm["ffn"],
+                       dropout=hpm["dropout"], pe=pe).to(dev)
+    coll = functools.partial(pad_collate, w=hpm["window"])
+    dl_tr = DataLoader(ds_tr, batch_size=hpm["batch"], shuffle=True,
+                       collate_fn=coll, num_workers=4, persistent_workers=True)
+    dl_va = DataLoader(ds_va, batch_size=hpm["batch"], collate_fn=coll,
+                       num_workers=4, persistent_workers=True)
+    opt = torch.optim.AdamW(model.parameters(), lr=hpm["lr"], weight_decay=1e-5)
+    n_ep, warm = hpm["epochs"], hpm["warmup"]
+    best, best_state, bad = 1e9, None, 0
+    for ep in range(n_ep):
+        cur = (hpm["lr"] * (ep + 1) / warm if ep < warm else
+               hpm["lr"] * 0.5 * (1 + math.cos(math.pi * (ep - warm)
+                                               / max(n_ep - warm, 1))))
+        for g in opt.param_groups:
+            g["lr"] = cur
+        model.train()
+        for A, Y, m, P in dl_tr:
+            A, Y = A.to(dev).float(), Y.to(dev).float()
+            m, P = m.to(dev), P.to(dev).float()
+            w = m.unsqueeze(-1).float()
+            loss = (((model(A, P) - Y) ** 2) * w).sum() / w.sum().clamp(min=1.0)
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+        model.eval()
+        vl, n = 0.0, 0
+        with torch.no_grad():
+            for A, Y, m, P in dl_va:
+                A, Y = A.to(dev).float(), Y.to(dev).float()
+                m, P = m.to(dev), P.to(dev).float()
+                w = m.unsqueeze(-1).float()
+                vl += float((((model(A, P) - Y) ** 2) * w).sum())
+                n += int(w.sum().item())
+        vl = vl / max(n, 1)
+        if vl < best - 1e-7:
+            best, best_state, bad = vl, copy.deepcopy(model.state_dict()), 0
+        else:
+            bad += 1
+            if bad >= hpm["patience"]:
+                break
+    if best_state:
+        model.load_state_dict(best_state)
+    out_path = pathlib.Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"state": model.state_dict(), "n_act": ds_tr.n_act, "hp": hpm,
+                "pe": pe, "mean": mean, "std": std, "tgt_mean": tgt_mean,
+                "tgt_std": tgt_std, "n_out": N_OUT,
+                # Task 8's P3 picks "best rope" / "best upe" by VAL mse, read back
+                # from this artifact -- never by test score. Must be persisted.
+                "best_val_mse": float(best)}, out_path)
+    model.best_val_mse = float(best)
+    return {"best_val_mse": float(best), "n_act": ds_tr.n_act, "pe": pe,
+            "n_windows_train": len(ds_tr),
+            "n_params": int(sum(q.numel() for q in model.parameters()))}

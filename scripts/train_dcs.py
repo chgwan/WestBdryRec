@@ -14,10 +14,12 @@ from src.proj_config import get_proj_config  # noqa: E402
 from src.ml import bench  # noqa: E402
 from src.ml.dcs_features import (load_dcs_config, load_meta, node_col_map,  # noqa: E402
                                  read_snapshot, read_series)
-from src.ml.models import ResMLP, ActSeqGRU  # noqa: E402
+from src.ml.models import ResMLP, ActSeqGRU, ActSeqAttn  # noqa: E402
+from src.ml.dataset import DCSWindowDataset  # noqa: E402
 from src.ml.predictions import save_predictions  # noqa: E402
 from src.ml.score34 import score_dcs34  # noqa: E402
-from src.ml.train import (train_m0_dcs, train_m1_dcs, train_m2_dcs, _device)  # noqa: E402
+from src.ml.train import (train_m0_dcs, train_m1_dcs, train_m2_dcs, train_m3_dcs,  # noqa: E402
+                          _device)
 from src.ml.target import N_OUT, destandardize  # noqa: E402
 from src.ml.target import load_target  # noqa: E402
 
@@ -101,6 +103,51 @@ def _pred_m2(art, npz_dir, shots, cfg, ncm, out):
     save_predictions(out, preds)
 
 
+def _pred_m3(art, npz_dir, shots, cfg, ncm, out):
+    """Window each test shot, gather the scored rows, and assert the row contract.
+
+    ``v`` is _pred_m2's expression verbatim, so m3 keeps and drops exactly the
+    slices m2 does. The assert is deliberate: score_dcs34 raises on a mismatch but
+    bench.score_predictions only warns and skips, which would silently shrink a
+    comparison.
+    """
+    a = torch.load(art, map_location="cpu", weights_only=False)
+    hp, pe = a["hp"], a["pe"]
+    mean = np.asarray(a["mean"], float)
+    std = np.maximum(np.asarray(a["std"], float), 1e-6)
+    model = ActSeqAttn(n_act=a["n_act"], n_out=a.get("n_out", N_OUT), d=hp["d_model"],
+                       heads=hp["heads"], depth=hp["depth"], ffn=hp["ffn"],
+                       dropout=hp["dropout"], pe=pe).to(_device()).eval()
+    model.load_state_dict(a["state"])
+    kw = dict(cfg=cfg, ncm=ncm, mean=mean, std=std, pe=pe, d_model=hp["d_model"],
+              w=hp["window"], ctx=hp["ctx"])
+    preds = {}
+    with torch.no_grad():
+        for s in shots:
+            p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+            if not p.exists():
+                continue
+            _A, mask = read_series(p, cfg, ncm)
+            _T, finite = load_target(p)
+            v = mask & finite
+            if not v.any():
+                continue
+            ds = DCSWindowDataset(npz_dir, [s], **kw)
+            rows = []
+            for j in range(len(ds)):
+                aw, _y, lm, pos = ds[j]
+                z = model(aw[None].to(_device()).float(),
+                          pos[None].to(_device()).float())[0].cpu().numpy()
+                rows.append(z[lm.numpy()])
+            z = np.concatenate(rows) if rows else np.zeros((0, N_OUT), np.float32)
+            if z.shape[0] != int(v.sum()):
+                raise SystemExit(
+                    f"shot {s}: gathered {z.shape[0]} rows but the predict mask has "
+                    f"{int(v.sum())} -- the window tiling and the mask disagree")
+            preds[int(s)] = destandardize(z, a["tgt_mean"], a["tgt_std"]).astype(np.float32)
+    save_predictions(out, preds)
+
+
 def _score(npz_dir, pred_path, train_shots, test_shots):
     meta = load_meta(npz_dir)
     theta = np.deg2rad(np.asarray(meta["theta_deg"], float))
@@ -116,9 +163,12 @@ def _score(npz_dir, pred_path, train_shots, test_shots):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("model", choices=["m0", "m1", "m2", "all"])
+    ap.add_argument("model", choices=["m0", "m1", "m2", "m3", "all"])
     ap.add_argument("--shots", type=int, nargs="*", default=None, help="override train pool (tests)")
     ap.add_argument("--epochs", type=int, default=None)
+    ap.add_argument("--pe", default=None,
+                    help="M3 positional-encoding variant; overrides hp.m3.pe "
+                         "(rope_idx | rope_time | upe_idx | upe_time | upe_both)")
     ap.add_argument("--bench-out", default=None)
     ap.add_argument("--npz-dir", default=None,
                     help="dataset to train on (default: cfg.mergednpz_dir); "
@@ -133,8 +183,9 @@ def main():
     npz_dir = pathlib.Path(args.npz_dir) if args.npz_dir else CFG.mergednpz_dir
     cfg = load_dcs_config(args.config)
     if args.epochs is not None:
-        for k in ("m1", "m2"):
-            cfg["hp"][k]["epochs"] = args.epochs
+        for k in ("m1", "m2", "m3"):
+            if k in cfg["hp"]:
+                cfg["hp"][k]["epochs"] = args.epochs
     _, ncm = _meta_ncm(npz_dir)
     if args.shots is not None:
         train = test = sorted(args.shots)
@@ -152,8 +203,11 @@ def main():
             train_m0_dcs(npz_dir, art, cfg=cfg, shots=args.shots); _pred_m0(art, npz_dir, test, cfg, ncm, pred)
         elif mdl == "m1":
             train_m1_dcs(npz_dir, art, cfg=cfg, shots=args.shots); _pred_m1(art, npz_dir, test, cfg, ncm, pred)
-        else:
+        elif mdl == "m2":
             train_m2_dcs(npz_dir, art, cfg=cfg, shots=args.shots); _pred_m2(art, npz_dir, test, cfg, ncm, pred)
+        elif mdl == "m3":
+            train_m3_dcs(npz_dir, art, cfg=cfg, shots=args.shots, pe=args.pe)
+            _pred_m3(art, npz_dir, test, cfg, ncm, pred)
         sc = _score(npz_dir, pred, train, test)
         rows.append({"run": args.run_name or cfg["run"], "model": mdl, **sc})
         print(f"{mdl}: CCC={sc['ccc']:.4f} R2={sc['r2']:.4f} RMSE={sc['rmse_cm']:.2f}cm n_shots={sc['n_shots']}")
