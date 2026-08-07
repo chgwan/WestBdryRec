@@ -22,6 +22,7 @@ from torch.utils.data import Dataset
 from ..proj_config import get_proj_config
 from ..data.imas_flat_top import flat_top_window
 from .dcs_features import read_snapshot, read_series
+from .pos_encoding import VARIANTS, modal_cadence, upe_table
 from .target import load_target, standardize
 
 
@@ -257,3 +258,136 @@ class DCSSeqDataset(Dataset):
         A = ((A - self.mean) / self.std).astype(np.float32)
         return (torch.from_numpy(A), torch.from_numpy(Y),
                 torch.from_numpy(m))
+
+
+# ── DCS windowed torch dataset (M3 attention) ─────────────────────────
+
+W_DEFAULT = 2048        # window length in steps (4.19 s on the 488 Hz axis)
+CTX_DEFAULT = 512       # attended-but-unscored prefix (1.05 s)
+
+
+def window_blocks(nt, w=W_DEFAULT, ctx=CTX_DEFAULT):
+    """``[(win_start, win_end, blk_start, blk_end)]`` tiling ``[0, nt)``.
+
+    Scored blocks are **disjoint and cover ``[0, nt)`` exactly**, at stride
+    ``w - ctx``; each is preceded by up to ``ctx`` steps that are attended but never
+    scored, so every scored step has left context. The first block has none (nothing
+    exists before ``t = 0``) and the last window may be short.
+
+    The partition property is what guarantees each valid slice enters the loss once
+    and that eval reproduces the predict mask exactly -- asserted in
+    ``tests/test_ml_window_dataset.py``.
+    """
+    stride = w - ctx
+    if stride <= 0:
+        raise ValueError(f"ctx {ctx} must be < w {w}")
+    out, b = [], 0
+    while b < nt:
+        be = min(b + stride, nt)
+        out.append((max(0, b - ctx), be, b, be))
+        b = be
+    return out
+
+
+def pad_collate(batch, w=W_DEFAULT):
+    """Right-pad variable-length windows to ``w``. Returns ``(A, Y, M, P)``.
+
+    No attention mask is produced or needed: the model is causal, so a real position
+    never attends rightward into the padding, and padded steps carry ``M = False``.
+    """
+    a0, y0, _m0, p0 = batch[0]
+    B = len(batch)
+    A = torch.zeros(B, w, a0.shape[1], dtype=torch.float32)
+    Y = torch.zeros(B, w, y0.shape[1], dtype=torch.float32)
+    M = torch.zeros(B, w, dtype=torch.bool)
+    P = (torch.zeros(B, w, dtype=torch.float32) if p0.dim() == 1
+         else torch.zeros(B, w, p0.shape[1], dtype=torch.float32))
+    for i, (a, y, m, p) in enumerate(batch):
+        n = a.shape[0]
+        A[i, :n], Y[i, :n], M[i, :n], P[i, :n] = a, y, m, p
+    return A, Y, M, P
+
+
+class DCSWindowDataset(Dataset):
+    """Per-window actuator series for M3. One item is one window of one shot.
+
+    ``(A(L, n_act), Y(L, 34), loss_mask(L,), P)`` where ``P`` is the positional
+    payload the ``pe`` variant needs: ``(L,)`` window-relative offsets for ``rope_*``,
+    or the ``(L, d_model)`` absolute additive table for ``upe_*``. ``L`` is the actual
+    window length; :func:`pad_collate` pads to ``w``.
+
+    ``loss_mask`` is ``v & in_scored_block``, with ``v`` **byte-for-byte** the mask
+    ``scripts/train_dcs.py:_pred_m2`` uses -- ``read_series``'s mask AND the target's
+    finite mask. Do not "improve" it: m3 must keep and drop exactly the slices m2
+    does, or the arms are not comparable.
+
+    Positions are ignitron-anchored and in cadence units. ``time[0]`` is nonzero in
+    100 % of shots (median 0.053 s = 26 samples), so an index taken as the NPZ row
+    number would sit a per-shot constant away from ``t / c`` -- the pair would then
+    measure span-anchored-vs-ignitron-anchored, a confound, instead of index-vs-time.
+    Hence ``n0 = round(time[0] / c_modal)``.
+    """
+
+    def __init__(self, npz_dir, shots, cfg, ncm, mean, std, pe="rope_idx",
+                 d_model=256, w=W_DEFAULT, ctx=CTX_DEFAULT,
+                 tgt_mean=None, tgt_std=None):
+        if pe not in VARIANTS:
+            raise ValueError(f"pe must be one of {VARIANTS}, got {pe!r}")
+        self.pe, self.d_model, self.w, self.ctx = pe, int(d_model), int(w), int(ctx)
+        self.mean = np.asarray(mean, float)
+        self.std = np.maximum(np.asarray(std, float), 1e-6)
+        self.tgt_mean = None if tgt_mean is None else np.asarray(tgt_mean, float)
+        self.tgt_std = None if tgt_std is None else np.asarray(tgt_std, float)
+        self.shots, self.index = [], []
+        n_act = None
+        for s in shots:
+            p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
+            if not p.exists():
+                continue
+            A, mask = read_series(p, cfg, ncm)
+            T, finite = load_target(p)
+            v = mask & finite                     # == _pred_m2's v, exactly
+            if not v.any():
+                continue
+            if self.tgt_mean is not None:
+                T = standardize(T, self.tgt_mean, self.tgt_std)
+            # zero-fill AFTER masking: NaN * 0 = NaN poisons the loss and every
+            # gradient (see DCSSeqDataset and tests/test_ml_seq_mask.py).
+            T = np.nan_to_num(T, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+            t = np.load(p)["time"].astype(np.float64)
+            c = modal_cadence(t)
+            n0 = float(round(float(t[0]) / c))
+            ipos = n0 + np.arange(t.size, dtype=np.float64)
+            tpos = t / c
+            k = len(self.shots)
+            self.shots.append((A, T, v, ipos, tpos))
+            self.index.extend((k, *blk) for blk in window_blocks(t.size, w, ctx))
+            n_act = A.shape[1]
+        self.n_act = int(n_act) if n_act is not None else 0
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, j):
+        k, ws, we, bs, _be = self.index[j]
+        A, T, v, ipos, tpos = self.shots[k]
+        a = ((A[ws:we] - self.mean) / self.std).astype(np.float32)
+        lm = v[ws:we].copy()
+        lm[: bs - ws] = False                      # the context prefix is not scored
+        return (torch.from_numpy(a), torch.from_numpy(T[ws:we]),
+                torch.from_numpy(lm), torch.from_numpy(self._pos(ipos[ws:we],
+                                                                tpos[ws:we])))
+
+    def _pos(self, ipos, tpos):
+        """This window's positional payload: rope offsets, or the absolute upe table.
+
+        ``rope_*`` shifts to the window start -- RoPE only uses differences, and an
+        absolute ``t/c`` would reach ~49,300 on the longest shot, where float32's ~7
+        significant digits leave ~2 digits of phase. ``upe_*`` must NOT be shifted:
+        it is absolute by definition.
+        """
+        if self.pe == "rope_idx":
+            return (ipos - ipos[0]).astype(np.float32)
+        if self.pe == "rope_time":
+            return (tpos - tpos[0]).astype(np.float32)
+        return upe_table(self.pe, ipos, tpos, self.d_model)
