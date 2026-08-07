@@ -1,0 +1,51 @@
+# DCS strict-actuator LCFS predictor, newTrain rebuild (NpzGeom dataset).
+#
+# Same 18 strict actuators as configs/dcs_model.yml -- "the same input from the
+# previous" -- plus the 10 time positional-encoding columns the NpzGeom builder
+# appends (newTrain item 4). Trained against the per-slice-GMAG_GEOM-origin target
+# on the 488 Hz GMAG_BND time base, with the S0-S5 slice filters applied.
+#
+# The PE channels use kind `pe`, which is deliberately none of pf/lh/ic so they do
+# not leak into the derived pf_norm / lh_plus_ic / cum_heat features.
+run: dcs_actuator_dtabs
+
+channels:        # 18 strict actuators; kind drives derived feats; nan drives policy
+  - {node: PowLH1_scope, kind: lh,        nan: zero}
+  - {node: PowLH2_scope, kind: lh,        nan: zero}
+  - {node: PhaLH1_scope, kind: lh_phase,  nan: zero}
+  - {node: PhaLH2_scope, kind: lh_phase,  nan: zero}
+  - {node: PowIC1_scope, kind: ic,        nan: zero}
+  - {node: PowIC2_scope, kind: ic,        nan: zero}
+  - {node: PowIC3_scope, kind: ic,        nan: zero}
+  - {node: Ip_scope,     kind: ip,        nan: drop}
+  - {node: IBb_scope,    kind: pf,        nan: drop}
+  - {node: IDb_scope,    kind: pf,        nan: drop}
+  - {node: IEb_scope,    kind: pf,        nan: drop}
+  - {node: IFb_scope,    kind: pf,        nan: drop}
+  - {node: IFh_scope,    kind: pf,        nan: drop}
+  - {node: IEh_scope,    kind: pf,        nan: drop}
+  - {node: IDh_scope,    kind: pf,        nan: drop}
+  - {node: IBh_scope,    kind: pf,        nan: drop}
+  - {node: IXb_scope,    kind: pf,        nan: drop}
+  - {node: IXh_scope,    kind: pf,        nan: drop}
+  # time positional encoding: sin/cos pairs of ignitron seconds, base 5,
+  # wavelengths 6.3 / 8.7 / 11.9 / 16.5 / 22.8 s
+  - {node: pe_sin_0_T6.3s,  kind: pe, nan: zero}
+  - {node: pe_cos_0_T6.3s,  kind: pe, nan: zero}
+  - {node: pe_sin_1_T8.7s,  kind: pe, nan: zero}
+  - {node: pe_cos_1_T8.7s,  kind: pe, nan: zero}
+  - {node: pe_sin_2_T12.0s, kind: pe, nan: zero}
+  - {node: pe_cos_2_T12.0s, kind: pe, nan: zero}
+  - {node: pe_sin_3_T16.5s, kind: pe, nan: zero}
+  - {node: pe_cos_3_T16.5s, kind: pe, nan: zero}
+  - {node: pe_sin_4_T22.8s, kind: pe, nan: zero}
+  - {node: pe_cos_4_T22.8s, kind: pe, nan: zero}
+  - {node: dt_gap_s,       kind: pe, nan: zero}
+
+derived: [pf_norm, lh_plus_ic, cum_heat, time_rel]
+max_per_shot: 300
+
+hp:
+  m0: {max_iter: 200, max_depth: 8, learning_rate: 0.1, l2_regularization: 1.0}
+  m1: {hidden: 256, depth: 4, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}
+  m2: {hidden: 64, layers: 2, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}

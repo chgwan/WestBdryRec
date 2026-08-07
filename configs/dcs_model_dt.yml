@@ -1,0 +1,32 @@
+# DCS strict-actuator LCFS predictor (pooled CCC). Drives src/ml/dcs_features.py
+# and scripts/train_dcs.py. Channels map to MergedNpz X columns by node name.
+run: dcs_actuator_dt
+
+channels:        # 18 strict actuators; kind drives derived feats; nan drives policy
+  - {node: PowLH1_scope, kind: lh,        nan: zero}
+  - {node: PowLH2_scope, kind: lh,        nan: zero}
+  - {node: PhaLH1_scope, kind: lh_phase,  nan: zero}
+  - {node: PhaLH2_scope, kind: lh_phase,  nan: zero}
+  - {node: PowIC1_scope, kind: ic,        nan: zero}
+  - {node: PowIC2_scope, kind: ic,        nan: zero}
+  - {node: PowIC3_scope, kind: ic,        nan: zero}
+  - {node: Ip_scope,     kind: ip,        nan: drop}
+  - {node: IBb_scope,    kind: pf,        nan: drop}
+  - {node: IDb_scope,    kind: pf,        nan: drop}
+  - {node: IEb_scope,    kind: pf,        nan: drop}
+  - {node: IFb_scope,    kind: pf,        nan: drop}
+  - {node: IFh_scope,    kind: pf,        nan: drop}
+  - {node: IEh_scope,    kind: pf,        nan: drop}
+  - {node: IDh_scope,    kind: pf,        nan: drop}
+  - {node: IBh_scope,    kind: pf,        nan: drop}
+  - {node: IXb_scope,    kind: pf,        nan: drop}
+  - {node: IXh_scope,    kind: pf,        nan: drop}
+  - {node: dt_gap_s,     kind: pe,        nan: zero}
+
+derived: [pf_norm, lh_plus_ic, cum_heat, time_rel]
+max_per_shot: 300
+
+hp:
+  m0: {max_iter: 200, max_depth: 8, learning_rate: 0.1, l2_regularization: 1.0}
+  m1: {hidden: 256, depth: 4, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}
+  m2: {hidden: 64, layers: 2, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}
