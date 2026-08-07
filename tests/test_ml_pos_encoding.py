@@ -86,12 +86,26 @@ def test_upe_time_equals_upe_idx_on_a_uniform_axis():
     assert np.allclose(a, b, atol=1e-5), "V2's upe pair must be numerically identical"
 
 
-def test_upe_both_halves_are_the_two_single_variants():
-    _t, ipos, tpos, _c = _uniform()
-    both = upe_table("upe_both", ipos, tpos, 256)
-    assert both.shape == (ipos.size, 256)
-    assert np.allclose(both[:, :128], upe_table("upe_time", ipos, tpos, 128), atol=1e-5)
-    assert np.allclose(both[:, 128:], upe_table("upe_idx", ipos, tpos, 128), atol=1e-5)
+def test_upe_both_concat_order_is_time_then_index():
+    """upe_both = [time_half | idx_half]. The order is only checkable where the two
+    encodings actually diverge, so use a non-uniform axis with a real gap."""
+    c = 2.048e-3
+    dt = np.full(64, c)
+    dt[32] = 7 * c                                # a gap separates time from index
+    t = np.concatenate([[0.0], np.cumsum(dt)])
+    ipos = np.arange(t.size, dtype=np.float64)
+    tpos = t / c
+    both = upe_table("upe_both", ipos, tpos, 64)
+    assert both.shape == (ipos.size, 64)
+    time_half = upe_table("upe_time", ipos, tpos, 32)
+    idx_half = upe_table("upe_idx", ipos, tpos, 32)
+    # the fixture must actually separate the two, else the order is uncheckable:
+    assert not np.allclose(time_half, idx_half, atol=1e-5), \
+        "fixture failed to separate time and index encodings"
+    assert np.allclose(both[:, :32], time_half, atol=1e-5), \
+        "first half of upe_both must be the time variant"
+    assert np.allclose(both[:, 32:], idx_half, atol=1e-5), \
+        "second half of upe_both must be the index variant"
 
 
 def test_rope_offsets_agree_on_a_uniform_axis():
