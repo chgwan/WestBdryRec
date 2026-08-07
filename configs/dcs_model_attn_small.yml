@@ -1,0 +1,55 @@
+# M3 windowed causal-attention tier, CAPACITY-MATCHED to m2-GRU.
+#
+# d64/4h/2L = 103,778 params vs m2-GRU's 53,730 (1.93x), against the big config's
+# 4,753,698 (88x). This arm exists so "attention beats recurrence" can be tested
+# without the capacity confound. Everything except d_model/heads/depth/ffn is
+# identical to configs/dcs_model_attn.yml -- including lr, which is deliberately NOT
+# re-tuned for the smaller model (re-tuning would confound capacity with
+# optimisation; see spec section 5.2).
+#
+# 18 strict actuators ONLY -- no pe_* and no dt_gap_s. Positional information reaches
+# M3 through the architecture (--pe), never as an input column.
+run: dcs_attn_small
+
+channels:        # 18 strict actuators; kind drives derived feats; nan drives policy
+  - {node: PowLH1_scope, kind: lh,        nan: zero}
+  - {node: PowLH2_scope, kind: lh,        nan: zero}
+  - {node: PhaLH1_scope, kind: lh_phase,  nan: zero}
+  - {node: PhaLH2_scope, kind: lh_phase,  nan: zero}
+  - {node: PowIC1_scope, kind: ic,        nan: zero}
+  - {node: PowIC2_scope, kind: ic,        nan: zero}
+  - {node: PowIC3_scope, kind: ic,        nan: zero}
+  - {node: Ip_scope,     kind: ip,        nan: drop}
+  - {node: IBb_scope,    kind: pf,        nan: drop}
+  - {node: IDb_scope,    kind: pf,        nan: drop}
+  - {node: IEb_scope,    kind: pf,        nan: drop}
+  - {node: IFb_scope,    kind: pf,        nan: drop}
+  - {node: IFh_scope,    kind: pf,        nan: drop}
+  - {node: IEh_scope,    kind: pf,        nan: drop}
+  - {node: IDh_scope,    kind: pf,        nan: drop}
+  - {node: IBh_scope,    kind: pf,        nan: drop}
+  - {node: IXb_scope,    kind: pf,        nan: drop}
+  - {node: IXh_scope,    kind: pf,        nan: drop}
+
+derived: [pf_norm, lh_plus_ic, cum_heat, time_rel]
+max_per_shot: 300        # snapshot-model knob; M3 uses windows and ignores it
+
+hp:
+  # m0/m1/m2 kept so this config stays loadable by every trainer; unused by M3.
+  m0: {max_iter: 200, max_depth: 8, learning_rate: 0.1, l2_regularization: 1.0}
+  m1: {hidden: 256, depth: 4, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}
+  m2: {hidden: 64, layers: 2, dropout: 0.1, lr: 0.001, epochs: 80, patience: 12}
+  m3:
+    pe: rope_idx         # overridden by --pe; this is only the default
+    d_model: 64          # <- the only difference from dcs_model_attn.yml
+    heads: 4             # <-
+    depth: 2             # <-
+    ffn: 256             # <-
+    dropout: 0.1
+    window: 2048
+    ctx: 512
+    batch: 16
+    lr: 0.0003           # deliberately NOT re-tuned for the smaller model
+    warmup: 5
+    epochs: 80
+    patience: 12
