@@ -126,15 +126,17 @@ def test_trainers_never_seed_the_split():
     """The split must stay pinned at split-seed 0. If a future edit wires the
     training seed into load_filtered_split or split_shots_3, the 76 test shots
     move and the entire variance study is silently invalidated. T2 above tests
-    split_shots_3's own RNG isolation; THIS test guards the trainer call sites."""
-    import inspect, re
+    split_shots_3's own RNG isolation; THIS test guards the trainer call sites.
+
+    Line-level (not regex) so nested parens like split_shots_3(list(shots), ...)
+    can't hide a seed= kwarg from the check."""
+    import inspect
     from src.ml import train as T
     for fn in (T.train_m2_dcs, T.train_m3_dcs):
-        src = inspect.getsource(fn)
-        calls = re.findall(r'(?:load_filtered_split|split_shots_3)\([^)]*\)', src)
-        assert calls, f"{fn.__name__}: expected a split call, found none"
-        for call in calls:
-            assert "seed" not in call, (
-                f"{fn.__name__} seeds the split via '{call}' -- the training seed "
-                "must NEVER reach the split (pinned at split seed 0); doing so would "
-                "change the 76 test shots and void the variance study")
+        for line in inspect.getsource(fn).splitlines():
+            if "load_filtered_split(" in line or "split_shots_3(" in line:
+                assert "seed" not in line, (
+                    f"{fn.__name__} seeds the split via {line.strip()!r} -- the "
+                    "training seed must NEVER reach the split (pinned at split "
+                    "seed 0); doing so would change the 76 test shots and void "
+                    "the variance study")
