@@ -308,6 +308,22 @@ def pad_collate(batch, w=W_DEFAULT):
     return A, Y, M, P
 
 
+def drop_keep(nt, shot, drop_frac, drop_seed, floor=100):
+    """Deterministic per-shot retention mask for the dropout dose-response.
+
+    Independent of the training seed (uses ``drop_seed + shot``), so ``rope_idx`` and
+    ``rope_time`` drop identical slices and the 3 training seeds drop identical slices.
+    At ``drop_frac <= 0`` it is a no-op (all-keep). A floor guard keeps every shot
+    non-degenerate so windowing never sees an empty sequence.
+    """
+    if drop_frac <= 0:
+        return np.ones(nt, dtype=bool)
+    keep = np.random.default_rng(drop_seed + int(shot)).random(nt) >= drop_frac
+    if int(keep.sum()) < floor:
+        keep = np.ones(nt, dtype=bool)
+    return keep
+
+
 class DCSWindowDataset(Dataset):
     """Per-window actuator series for M3. One item is one window of one shot.
 
@@ -330,10 +346,11 @@ class DCSWindowDataset(Dataset):
 
     def __init__(self, npz_dir, shots, cfg, ncm, mean, std, pe="rope_idx",
                  d_model=256, w=W_DEFAULT, ctx=CTX_DEFAULT,
-                 tgt_mean=None, tgt_std=None):
+                 tgt_mean=None, tgt_std=None, drop_frac=0.0, drop_seed=0):
         if pe not in VARIANTS:
             raise ValueError(f"pe must be one of {VARIANTS}, got {pe!r}")
         self.pe, self.d_model, self.w, self.ctx = pe, int(d_model), int(w), int(ctx)
+        self.drop_frac, self.drop_seed = float(drop_frac), int(drop_seed)
         self.mean = np.asarray(mean, float)
         self.std = np.maximum(np.asarray(std, float), 1e-6)
         self.tgt_mean = None if tgt_mean is None else np.asarray(tgt_mean, float)
@@ -355,6 +372,9 @@ class DCSWindowDataset(Dataset):
             # gradient (see DCSSeqDataset and tests/test_ml_seq_mask.py).
             T = np.nan_to_num(T, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
             t = np.load(p)["time"].astype(np.float64)
+            keep = drop_keep(t.size, int(s), self.drop_frac, self.drop_seed)
+            if not keep.all():
+                A, T, v, t = A[keep], T[keep], v[keep], t[keep]
             c = modal_cadence(t)
             n0 = float(round(float(t[0]) / c))
             ipos = n0 + np.arange(t.size, dtype=np.float64)
