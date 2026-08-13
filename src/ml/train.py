@@ -499,7 +499,8 @@ def train_m2_imas(h5_dir, npz_dir, out_path, hp, raw_names, shots=None):
     return {"best_val_mse": float(best), "n_act": n_act}
 
 
-def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None, seed=0):
+def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None, seed=0,
+                 drop_frac=0.0, drop_seed=0):
     """Train ActSeqAttn on fixed-length windows of the DCS actuator series.
 
     Its own loop, modelled on :func:`train_m2_dcs`: :func:`train_neural` cannot be
@@ -523,7 +524,8 @@ def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None, seed=0):
     tgt_mean, tgt_std = target_mean_std(npz_dir, train)
     kw = dict(cfg=cfg, ncm=ncm, mean=mean, std=std, pe=pe,
               d_model=hpm["d_model"], w=hpm["window"], ctx=hpm["ctx"],
-              tgt_mean=tgt_mean, tgt_std=tgt_std)
+              tgt_mean=tgt_mean, tgt_std=tgt_std,
+              drop_frac=drop_frac, drop_seed=drop_seed)
     ds_tr = DCSWindowDataset(npz_dir, train, **kw)
     ds_va = DCSWindowDataset(npz_dir, val, **kw)
     dev = _device()
@@ -580,9 +582,11 @@ def train_m3_dcs(npz_dir, out_path, cfg=None, shots=None, pe=None, seed=0):
                 "pe": pe, "mean": mean, "std": std, "tgt_mean": tgt_mean,
                 "tgt_std": tgt_std, "n_out": N_OUT,
                 # read back per run by the multi-seed analysis
-                "best_val_mse": float(best), "seed": int(seed)}, out_path)
+                "best_val_mse": float(best), "seed": int(seed),
+                "drop_frac": float(drop_frac), "drop_seed": int(drop_seed)}, out_path)
     model.best_val_mse = float(best)
     return {"best_val_mse": float(best), "n_act": ds_tr.n_act, "pe": pe,
             "n_windows_train": len(ds_tr),
             "n_params": int(sum(q.numel() for q in model.parameters())),
-            "seed": int(seed)}
+            "seed": int(seed), "drop_frac": float(drop_frac),
+            "drop_seed": int(drop_seed)}

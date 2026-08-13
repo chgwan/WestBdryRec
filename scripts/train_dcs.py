@@ -15,7 +15,7 @@ from src.ml import bench  # noqa: E402
 from src.ml.dcs_features import (load_dcs_config, load_meta, node_col_map,  # noqa: E402
                                  read_snapshot, read_series)
 from src.ml.models import ResMLP, ActSeqGRU, ActSeqAttn  # noqa: E402
-from src.ml.dataset import DCSWindowDataset  # noqa: E402
+from src.ml.dataset import DCSWindowDataset, drop_keep  # noqa: E402
 from src.ml.predictions import save_predictions  # noqa: E402
 from src.ml.score34 import score_dcs34  # noqa: E402
 from src.ml.train import (train_m0_dcs, train_m1_dcs, train_m2_dcs, train_m3_dcs,  # noqa: E402
@@ -113,6 +113,8 @@ def _pred_m3(art, npz_dir, shots, cfg, ncm, out):
     """
     a = torch.load(art, map_location="cpu", weights_only=False)
     hp, pe = a["hp"], a["pe"]
+    drop_frac = float(a.get("drop_frac", 0.0))
+    drop_seed = int(a.get("drop_seed", 0))
     mean = np.asarray(a["mean"], float)
     std = np.maximum(np.asarray(a["std"], float), 1e-6)
     model = ActSeqAttn(n_act=a["n_act"], n_out=a.get("n_out", N_OUT), d=hp["d_model"],
@@ -120,7 +122,8 @@ def _pred_m3(art, npz_dir, shots, cfg, ncm, out):
                        dropout=hp["dropout"], pe=pe).to(_device()).eval()
     model.load_state_dict(a["state"])
     kw = dict(cfg=cfg, ncm=ncm, mean=mean, std=std, pe=pe, d_model=hp["d_model"],
-              w=hp["window"], ctx=hp["ctx"])
+              w=hp["window"], ctx=hp["ctx"], drop_frac=drop_frac,
+              drop_seed=drop_seed)
     preds = {}
     with torch.no_grad():
         for s in shots:
@@ -130,6 +133,9 @@ def _pred_m3(art, npz_dir, shots, cfg, ncm, out):
             _A, mask = read_series(p, cfg, ncm)
             _T, finite = load_target(p)
             v = mask & finite
+            keep = drop_keep(v.size, int(s), drop_frac, drop_seed)
+            if not keep.all():
+                v = v[keep]
             if not v.any():
                 continue
             ds = DCSWindowDataset(npz_dir, [s], **kw)
@@ -172,6 +178,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0,
                     help="training seed: weight init, shuffle and dropout. Does NOT "
                          "change the train/val/test split (pinned at split seed 0).")
+    ap.add_argument("--drop-frac", type=float, default=0.0,
+                    help="M3 dropout dose-response: fraction of steps dropped per shot "
+                         "(deterministic, drop_seed + shot). 0.0 = no dropout.")
+    ap.add_argument("--drop-seed", type=int, default=0,
+                    help="seed for the dropout mask (independent of --seed).")
     ap.add_argument("--bench-out", default=None)
     ap.add_argument("--npz-dir", default=None,
                     help="dataset to train on (default: cfg.mergednpz_dir); "
@@ -211,18 +222,21 @@ def main():
             _pred_m2(art, npz_dir, test, cfg, ncm, pred)
         elif mdl == "m3":
             train_m3_dcs(npz_dir, art, cfg=cfg, shots=args.shots, pe=args.pe,
-                         seed=args.seed)
+                         seed=args.seed, drop_frac=args.drop_frac,
+                         drop_seed=args.drop_seed)
             _pred_m3(art, npz_dir, test, cfg, ncm, pred)
         sc = _score(npz_dir, pred, train, test)
         rows.append({"run": args.run_name or cfg["run"], "model": mdl,
-                     "seed": args.seed, **sc})
+                     "seed": args.seed, "drop_frac": args.drop_frac,
+                     "drop_seed": args.drop_seed, **sc})
         print(f"{mdl}: CCC={sc['ccc']:.4f} R2={sc['r2']:.4f} RMSE={sc['rmse_cm']:.2f}cm n_shots={sc['n_shots']}")
 
     out = pathlib.Path(args.bench_out) if args.bench_out else (CFG.stats_dir / "dcs_predictor" / "bench_table.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
     write_header = not out.exists()
     with out.open("a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["run", "model", "seed", "ccc", "r2",
+        w = csv.DictWriter(f, fieldnames=["run", "model", "seed", "drop_frac",
+                                          "drop_seed", "ccc", "r2",
                                           "similarity", "rmse_cm",
                                           "ccc_p90", "n_shots", "rgeom_mae_mm",
                                           "zgeom_mae_mm", "centre_rmse_mm",

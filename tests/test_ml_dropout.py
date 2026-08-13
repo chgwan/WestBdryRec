@@ -12,7 +12,6 @@ import pathlib
 import sys
 
 import numpy as np
-import pytest
 import torch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -125,3 +124,26 @@ def test_dataset_rope_positions_diverge_under_dropout(tmp_path, monkeypatch):
     assert np.allclose(np.diff(scored_i[:20]), 1.0), "rope_idx must be consecutive"
     scored_t = p_t[lm_t].numpy()
     assert (np.diff(scored_t) > 1.5).any(), "rope_time must show real gaps under dropout"
+
+
+# --------------------------------------------------------------- predict path ---
+def test_pred_m3_applies_the_training_mask():
+    """_pred_m3 must read drop_frac/drop_seed from the artifact and mask with them."""
+    import inspect
+    from scripts import train_dcs
+    src = inspect.getsource(train_dcs._pred_m3)
+    assert "drop_keep(" in src, "_pred_m3 must call drop_keep"
+    assert 'a.get("drop_frac"' in src and 'a.get("drop_seed"' in src, \
+        "_pred_m3 must read drop_frac/drop_seed from the artifact"
+    assert "drop_frac=drop_frac" in src, \
+        "_pred_m3's DCSWindowDataset kw must pass drop_frac through"
+
+
+def test_train_m3_persists_the_drop_settings():
+    """The artifact must carry both, or _pred_m3 silently scores unmasked slices."""
+    import inspect
+    from src.ml import train as T
+    src = inspect.getsource(T.train_m3_dcs)
+    assert '"drop_frac": float(drop_frac)' in src and '"drop_seed": int(drop_seed)' in src
+    assert "drop_frac=drop_frac, drop_seed=drop_seed" in src, \
+        "both datasets must be built with the same mask"
