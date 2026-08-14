@@ -12,6 +12,7 @@ import pathlib
 import sys
 
 import numpy as np
+import pytest
 import torch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -164,3 +165,54 @@ def test_train_m3_persists_the_drop_settings():
     assert '"drop_frac": float(drop_frac)' in src and '"drop_seed": int(drop_seed)' in src
     assert "drop_frac=drop_frac, drop_seed=drop_seed" in src, \
         "both datasets must be built with the same mask"
+
+
+# -------------------------------------------------------- scoring under dropout ---
+def test_score_dcs34_applies_the_dropout_mask(tmp_path):
+    """Scoring must mask truth with drop_keep so retained-slice predictions line up.
+
+    Regression for the f>0 smoke failure: ``_pred_m3`` writes retained-slice rows, so
+    ``score_dcs34`` must apply the same ``drop_keep`` to truth or its row-count guard
+    fires ("the predict mask and the scoring mask disagree"). At f=0 the drop params
+    are a no-op. Spec §4.4: scoring is over the retained test slices.
+    """
+    from src.ml.score34 import score_dcs34, _truth
+    from src.ml.predictions import save_predictions
+    from src.ml.target import N_RHO, N_OUT
+
+    theta = np.arange(N_RHO) / N_RHO * 2 * np.pi
+    rng = np.random.default_rng(0)
+    nt, s, f = 200, 57295, 0.5
+    rho = 0.5 + 0.02 * np.sin(theta)[None, :] + rng.normal(0, 1e-3, (nt, N_RHO))
+    C = np.column_stack([np.full(nt, 2.44), np.full(nt, -0.02)])
+    bnd = np.stack([C[:, :1] + rho * np.cos(theta)[None, :],
+                    C[:, 1:2] + rho * np.sin(theta)[None, :]], axis=-1).astype(np.float32)
+    np.savez(tmp_path / f"{s}.npz", Y=rho.astype(np.float32),
+             center=C.astype(np.float32), bnd_RZ=bnd,
+             valid=np.ones(nt, bool), time=np.arange(nt, dtype=np.float32))
+    (tmp_path / "meta.json").write_text(
+        '{"shots": [{"shot": %d}], "theta_deg": %s}' % (s, list(np.degrees(theta))))
+
+    keep = drop_keep(nt, s, f, 0)
+    full = _truth(tmp_path, s)
+    assert full.shape[0] == nt
+    retained = _truth(tmp_path, s, drop_frac=f, drop_seed=0)
+    assert retained.shape[0] == int(keep.sum()) < nt          # _truth shrinks under dropout
+
+    # Simulate _pred_m3's retained-slice predictions (== truth on those rows).
+    full_pred = np.concatenate([rho, C], axis=1).astype(np.float32)
+    save_predictions(tmp_path / "p.npz", {s: full_pred[keep]})
+
+    # WITHOUT the mask, scoring raises (the bug this test pins).
+    with pytest.raises(ValueError, match="predict mask and the scoring mask disagree"):
+        score_dcs34(tmp_path / "p.npz", tmp_path, [s], [s], theta)
+    # WITH the mask, scoring succeeds over the retained slices (pred == truth -> ccc~1).
+    m = score_dcs34(tmp_path / "p.npz", tmp_path, [s], [s], theta,
+                    drop_frac=f, drop_seed=0)
+    assert m["n_shots"] == 1
+    assert m["ccc"] > 0.999
+    # f=0 is a no-op: masking a full-length prediction with f=0 scores the same rows.
+    save_predictions(tmp_path / "p0.npz", {s: full_pred})
+    m0 = score_dcs34(tmp_path / "p0.npz", tmp_path, [s], [s], theta,
+                     drop_frac=0.0, drop_seed=0)
+    assert m0["n_shots"] == 1 and m0["ccc"] > 0.999

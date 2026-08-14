@@ -15,28 +15,43 @@ import pathlib
 import numpy as np
 
 from .axis_frame import reconstruct_absolute
+from .dataset import drop_keep
 from .metrics import boundary_metrics, ccc
 from .predictions import load_predictions
 from .target import N_OUT, N_RHO, load_target, split_outputs
 
 
-def _truth(npz_dir, shot, t_min=0.0):
-    """``T (n,34)`` over the rows the predict paths kept."""
+def _truth(npz_dir, shot, t_min=0.0, drop_frac=0.0, drop_seed=0):
+    """``T (n,34)`` over the rows the predict paths kept.
+
+    Applies the same per-shot ``drop_keep`` mask as ``_pred_m3`` so that under
+    dropout the truth rows line up 1:1 with the retained-slice predictions
+    (spec §4.4: scoring is over the retained test slices). A no-op at f=0.
+    """
     p = pathlib.Path(npz_dir) / f"{int(shot)}.npz"
     d = np.load(p)
     T, finite = load_target(p)
     v = finite & d["valid"].astype(bool) & (d["time"].astype(float) >= t_min)
+    keep = drop_keep(v.size, int(shot), drop_frac, drop_seed)
+    if not keep.all():
+        v = v & keep
     return T[v]
 
 
-def score_dcs34(pred_path, npz_dir, train_shots, test_shots, theta):
-    """Pooled metrics over ``test_shots``. ``theta`` is the (32,) angle grid in radians."""
+def score_dcs34(pred_path, npz_dir, train_shots, test_shots, theta,
+                drop_frac=0.0, drop_seed=0):
+    """Pooled metrics over ``test_shots``. ``theta`` is the (32,) angle grid in radians.
+
+    ``drop_frac``/``drop_seed`` thread the dropout mask into the truth so it matches
+    the retained-slice predictions. Defaults are a no-op (f=0 / non-dropout usage).
+    """
     preds = load_predictions(pred_path)
     for s, yp in preds.items():
         if np.asarray(yp).shape[-1] != N_OUT:
             raise ValueError(f"shot {s}: predictions are {np.asarray(yp).shape[-1]} wide, "
                              f"expected {N_OUT}")
-    rho_tr = np.concatenate([_truth(npz_dir, s)[:, :N_RHO] for s in train_shots])
+    rho_tr = np.concatenate([_truth(npz_dir, s, drop_frac=drop_frac, drop_seed=drop_seed)
+                             [:, :N_RHO] for s in train_shots])
     y_train_mean = rho_tr.mean(axis=0)
 
     rp, rt, cp, ct, ap, at = [], [], [], [], [], []
@@ -45,7 +60,7 @@ def score_dcs34(pred_path, npz_dir, train_shots, test_shots, theta):
         s = int(s)
         if s not in preds:
             continue
-        T = _truth(npz_dir, s)
+        T = _truth(npz_dir, s, drop_frac=drop_frac, drop_seed=drop_seed)
         P = np.asarray(preds[s], float)
         if P.shape[0] != T.shape[0]:
             raise ValueError(f"shot {s}: {P.shape[0]} predicted rows vs {T.shape[0]} truth "

@@ -154,10 +154,11 @@ def _pred_m3(art, npz_dir, shots, cfg, ncm, out):
     save_predictions(out, preds)
 
 
-def _score(npz_dir, pred_path, train_shots, test_shots):
+def _score(npz_dir, pred_path, train_shots, test_shots, drop_frac=0.0, drop_seed=0):
     meta = load_meta(npz_dir)
     theta = np.deg2rad(np.asarray(meta["theta_deg"], float))
-    m = score_dcs34(pred_path, str(npz_dir), train_shots, test_shots, theta)
+    m = score_dcs34(pred_path, str(npz_dir), train_shots, test_shots, theta,
+                    drop_frac=drop_frac, drop_seed=drop_seed)
     if m["n_shots"] == 0:
         raise SystemExit(f"{pred_path}: scored 0 shots -- refusing to write a bench row")
     return {"ccc": m["ccc"], "r2": m["r2"], "similarity": m["similarity"],
@@ -225,7 +226,8 @@ def main():
                          seed=args.seed, drop_frac=args.drop_frac,
                          drop_seed=args.drop_seed)
             _pred_m3(art, npz_dir, test, cfg, ncm, pred)
-        sc = _score(npz_dir, pred, train, test)
+        sc = _score(npz_dir, pred, train, test, drop_frac=args.drop_frac,
+                    drop_seed=args.drop_seed)
         rows.append({"run": args.run_name or cfg["run"], "model": mdl,
                      "seed": args.seed, "drop_frac": args.drop_frac,
                      "drop_seed": args.drop_seed, **sc})
