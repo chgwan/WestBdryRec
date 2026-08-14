@@ -113,6 +113,23 @@ def test_dataset_same_drop_seed_drops_same_slices_across_pe(tmp_path, monkeypatc
         assert a.index[j] == b.index[j], "rope_idx and rope_time must retain the same steps"
 
 
+def test_dataset_drop_mask_independent_of_global_rng(tmp_path, monkeypatch):
+    """The dataset's mask must not drift with the global RNG / training seed.
+
+    Spec T2 at integration level: two datasets built with the same drop_seed but
+    perturbed global RNG (a stand-in for the training seed) must retain byte-identical
+    steps -- seed variance is pure training stochasticity, never slice selection.
+    """
+    _fixture(tmp_path, monkeypatch=monkeypatch)
+    np.random.seed(11); torch.manual_seed(11)
+    a = _ds(tmp_path, drop_frac=0.5, drop_seed=0)
+    np.random.seed(22); torch.manual_seed(22)
+    b = _ds(tmp_path, drop_frac=0.5, drop_seed=0)
+    assert len(a.index) == len(b.index)
+    for j in range(len(a.index)):
+        assert a.index[j] == b.index[j], "the drop mask drifted with global RNG state"
+
+
 def test_dataset_rope_positions_diverge_under_dropout(tmp_path, monkeypatch):
     """After dropout rope_idx is consecutive; rope_time carries the real gaps."""
     _fixture(tmp_path, nt=3000, monkeypatch=monkeypatch)
