@@ -119,3 +119,59 @@ returns all-keep, the slice never executes) with byte-identical windows pinned b
 (torch 2.12 vs 2.11, A100-40GB vs 80GB) was pre-flagged as observation O2 in the
 plan. The between-arm comparison — the study's actual question — is unaffected:
 both encodings run on the same machine, torch and seeds, so drift cancels.
+
+## Post-hoc: the loss dose-response (2026-08-15)
+
+> **Post-hoc, not pre-registered.** The §6.2 analysis above was fixed before the
+> runs and its verdict stands. This section was added afterwards, at the authors'
+> request, because CCC is concordance-only and scale-invariant — a prediction can
+> preserve ranking while being systematically off in magnitude, which is exactly
+> the error mode dropout should worsen. The metric here is the training objective
+> itself: masked MSE over the standardized 34-column target, on the retained test
+> slices (per-run `tgt_mean`/`tgt_std` from the artifacts). The same
+> seed-SD floor and paired-Wilcoxon methodology is applied. Negative delta =
+> `rope_time` better.
+
+### Standardized test MSE
+
+| f | rope_idx MSE (SD) | rope_time MSE (SD) | pooled delta | median per-shot dMSE | floor | time-better seeds | median p |
+|---|---|---|---|---|---|---|---|
+| 0.0 | 0.12311 (0.00986) | 0.11696 (0.02128) | -0.00616 | +0.000028 | 0.021278 | 1/3 | 0.63 |
+| 0.3 | 0.17783 (0.01351) | 0.13316 (0.00884) | **-0.04467** | -0.001948 | 0.013511 | **3/3** | 0.72 |
+| 0.6 | 0.19976 (0.04236) | 0.22849 (0.05104) | +0.02872 | -0.001885 | 0.051038 | 0/3 | 0.25 |
+
+### Physical error metrics (from the bench table; lower is better)
+
+| metric | f=0.0 delta | f=0.3 delta | f=0.6 delta |
+|---|---|---|---|
+| RMSE radii (cm), idx vs time | 0.855 vs 0.825 (**-0.030**) | 1.015 vs 0.884 (**-0.131**) | 1.083 vs 1.155 (+0.071) |
+| centre RMSE (mm), idx vs time | 14.23 vs 14.16 (**-0.062**) | 15.61 vs 15.28 (**-0.328**) | 16.65 vs 16.03 (**-0.628**) |
+| abs-boundary RMSE (mm), idx vs time | 16.51 vs 16.29 (**-0.219**) | 18.60 vs 17.62 (**-0.979**) | 19.90 vs 19.79 (**-0.113**) |
+
+### Reading
+
+- **The pre-registered verdict is unchanged** — the median matched-seed per-shot
+  difference stays inside the seed floor at every f, on MSE as on CCC.
+- **But the loss view sharpens the f=0.3 nuance considerably.** Pooled MSE is
+  **25 % lower** for `rope_time` at f=0.3 (0.1332 vs 0.1778), better on **3/3
+  seeds**, the median per-shot delta is negative in **all 9 cross-seed pairings**,
+  and every physical metric agrees (radii -0.13 cm, centre -0.33 mm, abs boundary
+  -0.98 mm). CCC's pooled +0.004 understated this: CCC is blind to magnitude, and
+  magnitude is where the moderate-dropout advantage lives. Note the gate
+  asymmetry: the *pooled* delta (-0.045) exceeds the pooled seed-SD floor (0.0135)
+  while the *median per-shot* delta (-0.0019) does not — the typical shot gains
+  little, but the arm-level loss is decisively better.
+- **At f=0.6 the pooled loss flips** (+0.029, `rope_idx` better on 3/3 seeds, RMSE
+  agrees) while the median per-shot delta stays slightly negative — a skew
+  signature: at heavy dropout `rope_time` degrades through a heavy tail (some
+  shots much worse) rather than uniformly. The f=0.6 regime is also simply
+  noisier: seed 2 degraded in *both* arms (MSE 0.25-0.29 vs 0.17-0.20).
+- **Net.** The median shot is timing-insensitive at every f (the null), but the
+  loss shows `rope_time` buying a real magnitude-accuracy advantage at moderate
+  dropout and paying for it at heavy dropout — the "helps up to a point" shape
+  (§6.2's third reading), not a universal null. Honest framing per §1.4: this
+  says real-time PE helps *under moderate sparse sampling*; it still says nothing
+  about the real dense axis.
+
+Analysis: `exploration/dropout_analysis.py` (post-hoc section), log
+`logs/dropout_analysis.txt`.
