@@ -229,8 +229,8 @@ upward through a regime the actuators apparently do not explain, while the
 model outputs a static average boundary.
 
 Evidence: `docs/newtrain_dropout_results.md` §"Post-hoc correction" (18 runs,
-both PEs, 3 seeds); figures `figs/shot57486_result.png`,
-`figs/shot57486_lcfs_evolution.png` / `.mp4`.
+both PEs, 3 seeds); figures `figs/shot57486/shot57486_result.png`,
+`figs/shot57486/shot57486_lcfs_evolution.png` / `.mp4`.
 
 Candidate criterion for the next filter revision (not adopted yet): flag any
 shot on which **every** trained arm fails to beat the constant-baseline MSE —
