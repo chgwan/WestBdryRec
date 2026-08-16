@@ -175,3 +175,59 @@ both encodings run on the same machine, torch and seeds, so drift cancels.
 
 Analysis: `exploration/dropout_analysis.py` (post-hoc section), log
 `logs/dropout_analysis.txt`.
+
+## Post-hoc correction: shot 57486 and the 75-shot statistics (2026-08-16)
+
+> **This supersedes the "Reading" of the previous section.** Both large pooled
+> effects reported there — `rope_time`'s 25 % lower loss at f=0.3 and its
+> decline at f=0.6 — are artifacts of a single broken test shot. The
+> pre-registered CCC verdict (null on the median shot) is unchanged, and now
+> stands at every level.
+
+**Shot 57486** is unmodellable for this model family at every dropout level,
+under both encodings and all three seeds: per-shot CCC +0.25–0.31 (typical
+test shot ~0.995), standardized MSE 10–34 (typical 0.05–0.25) — worse than
+predicting the training mean (MSE ≈ 1), i.e. the model extrapolates
+systematically rather than regressing to the mean. Its boundary variability is
+exactly median (radii σ rank 36/76); what is out of distribution is the
+*regime*, not the dynamics — the discharge expands and drifts upward while the
+model outputs a static average plasma. Logged as a filter item in
+[`lcfs_filters.md`](lcfs_filters.md) §7.
+
+### Fingerprint on the pooled metrics (delta = rope_time − rope_idx)
+
+| f | pooled dMSE, all 76 shots | pooled dMSE, 75 shots |
+|---|---|---|
+| 0.0 | -0.006 | +0.001 |
+| 0.3 | **-0.045** | +0.000 |
+| 0.6 | **+0.029** | -0.002 |
+
+### Statistics on the 75 remaining shots
+
+| f | pooled CCC idx (SD) / time (SD) | median dCCC vs floor | pooled MSE idx (SD) / time (SD) | median dMSE vs floor |
+|---|---|---|---|---|
+| 0.0 | 0.99530 (0.00006) / 0.99520 (0.00006) | +0.000002 inside | 0.0494 (0.0005) / 0.0505 (0.0007) | +0.0001 inside |
+| 0.3 | 0.99485 (0.00013) / 0.99483 (0.00015) | +0.000150 vs 0.000149 | 0.0540 (0.0014) / 0.0544 (0.0015) | -0.0017 vs 0.0015 |
+| 0.6 | 0.99450 (0.00033) / 0.99471 (0.00015) | +0.000192 inside | 0.0578 (0.0036) / 0.0561 (0.0016) | -0.0020 inside |
+
+Seed wins and Wilcoxon p are in the log (f=0.3: 1/3 seeds for both metrics,
+p ≈ 0.8; f=0.6: 2/3 seeds, p ≈ 0.12–0.17).
+
+### What changes
+
+1. **The null is total.** Every between-arm effect collapses to ≤ 0.002 in
+   every metric at every f once the shot is excluded. The "helps up to a
+   point" shape reported above is retracted.
+2. **The measured seed floor was partly this shot.** The CCC floor collapses
+   0.0021 → 0.00006 at f=0 (30x): much of the between-seed variance was
+   57486's seed-dependent failure magnitude, not training stochasticity. On
+   clean data the arms are reproducible to CCC ± 0.0001.
+3. **The nominal f=0.3 "clearance" is not real** — CCC clears the shrunken
+   floor by 1e-6, p ≈ 0.8, 1/3 seeds, and the pooled mean favours `rope_idx`
+   there. f=0.6 is the strongest remaining hint (consistent direction, 2/3
+   seeds, both metrics) and still far from significant.
+4. **Every bench-table CCC in this report understates its arm by ~0.007**
+   because of this shot; on clean data f=0 `rope_idx` sits at 0.9953 ± 0.0001.
+
+Analysis: `exploration/dropout_analysis_no57486.py`, log
+`logs/dropout_analysis_no57486.txt`.

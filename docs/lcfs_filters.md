@@ -217,3 +217,22 @@ decide: either the model also predicts `(Rgeom, Zgeom)`, or evaluation stays in 
 This is already the IMAS track's structure — `src/ml/axis_frame.py` `reconstruct_absolute()`
 rebuilds absolute vertices from a per-slice axis plus `rho(θ)`, and IMAS `lcfs_rho` is already
 that form — so the change makes both pipelines share one representation.
+
+## 7. Known escape — shot 57486 (2026-08-16)
+
+Passes every S0–S5 criterion (5 297 / 5 298 slices valid, boundary variability
+exactly median — radii σ rank 36/76), yet is unmodellable by the M3 predictor
+at every input density: per-shot CCC 0.25–0.31 vs ~0.995 typical, standardized
+MSE 10–34 — **worse than predicting the train mean** (MSE ≈ 1), so the failure
+is systematic extrapolation, not noise. The discharge expands and drifts
+upward through a regime the actuators apparently do not explain, while the
+model outputs a static average boundary.
+
+Evidence: `docs/newtrain_dropout_results.md` §"Post-hoc correction" (18 runs,
+both PEs, 3 seeds); figures `figs/shot57486_result.png`,
+`figs/shot57486_lcfs_evolution.png` / `.mp4`.
+
+Candidate criterion for the next filter revision (not adopted yet): flag any
+shot on which **every** trained arm fails to beat the constant-baseline MSE —
+an out-of-distribution-regime test computable at scoring time without hand
+labelling. One observed case among the 76 test shots.
