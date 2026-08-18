@@ -40,28 +40,41 @@ inputs:                     # EXACTLY these 18 columns — nothing appended (no
                             # by train-split mean/std happens in DCSWindowDataset,
                             # not here. "kind" is snapshot-tier metadata; M3
                             # ignores it beyond the NaN policy.
-  # — lower-hybrid heating (NaN -> 0) —
-  - {node: PowLH1_scope, kind: lh}          # LH power, launcher 1
-  - {node: PowLH2_scope, kind: lh}          # LH power, launcher 2
-  - {node: PhaLH1_scope, kind: lh_phase}    # LH launcher-1 phase
-  - {node: PhaLH2_scope, kind: lh_phase}    # LH launcher-2 phase
-  # — ion-cyclotron heating (NaN -> 0) —
-  - {node: PowIC1_scope, kind: ic}          # IC power, antenna 1
-  - {node: PowIC2_scope, kind: ic}          # IC power, antenna 2
-  - {node: PowIC3_scope, kind: ic}          # IC power, antenna 3
-  # — plasma current (essential: NaN -> drop slice) —
-  - {node: Ip_scope,     kind: ip}
-  # — PF coil currents, bottom / top (essential: NaN -> drop slice) —
-  - {node: IBb_scope,    kind: pf}
-  - {node: IDb_scope,    kind: pf}
-  - {node: IEb_scope,    kind: pf}
-  - {node: IFb_scope,    kind: pf}
-  - {node: IXb_scope,    kind: pf}
-  - {node: IFh_scope,    kind: pf}
-  - {node: IEh_scope,    kind: pf}
-  - {node: IDh_scope,    kind: pf}
-  - {node: IBh_scope,    kind: pf}
-  - {node: IXh_scope,    kind: pf}
+                            #
+                            # REAL vs REF branch (WEST DCS `#real`/`#ref`,
+                            # resolved at NPZ build time by build_npz
+                            # .build_node_map from configs/base.yml input_list):
+                            #   *_real -> dcs/<node>/actual  (#real, MEASURED)
+                            #   *_ref  -> dcs/<node>/ref     (#ref, PROGRAMMED)
+                            # 17 of the 18 channels read #real (measured);
+                            # the exception is Ip_scope, which comes from
+                            # "Ip_ref" — the PROGRAMMED Ip reference. The
+                            # measured Ip (SMAG_IP) exists but is deliberately
+                            # NOT in input_list.
+  # — lower-hybrid heating (NaN -> 0) — all #real = dcs/<node>/actual —
+  - {node: PowLH1_scope, kind: lh}          # #real · LH power, launcher 1
+  - {node: PowLH2_scope, kind: lh}          # #real · LH power, launcher 2
+  - {node: PhaLH1_scope, kind: lh_phase}    # #real · LH launcher-1 phase
+  - {node: PhaLH2_scope, kind: lh_phase}    # #real · LH launcher-2 phase
+  # — ion-cyclotron heating (NaN -> 0) — all #real —
+  - {node: PowIC1_scope, kind: ic}          # #real · IC power, antenna 1
+  - {node: PowIC2_scope, kind: ic}          # #real · IC power, antenna 2
+  - {node: PowIC3_scope, kind: ic}          # #real · IC power, antenna 3
+  # — plasma current (essential: NaN -> drop slice) — THE #ref EXCEPTION —
+  - {node: Ip_scope,     kind: ip}          # #ref · PROGRAMMED Ip reference
+                                            #   (dcs/Ip_scope/ref; measured
+                                            #   SMAG_IP unused)
+  # — PF coil currents, bottom / top (essential: NaN -> drop slice) — #real —
+  - {node: IBb_scope,    kind: pf}          # #real
+  - {node: IDb_scope,    kind: pf}          # #real
+  - {node: IEb_scope,    kind: pf}          # #real
+  - {node: IFb_scope,    kind: pf}          # #real
+  - {node: IXb_scope,    kind: pf}          # #real
+  - {node: IFh_scope,    kind: pf}          # #real
+  - {node: IEh_scope,    kind: pf}          # #real
+  - {node: IDh_scope,    kind: pf}          # #real
+  - {node: IBh_scope,    kind: pf}          # #real
+  - {node: IXh_scope,    kind: pf}          # #real
 
 derived:                    # NOT M3 inputs — snapshot-tier only (read_snapshot,
                             # M0/M1). Listed here for parity with m0_model.yml;
