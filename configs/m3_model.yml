@@ -30,16 +30,29 @@ run: dcs_attn               # default run name (configs/dcs_model_attn.yml)
 model: ActSeqAttn           # windowed causal attention tier (src/ml/models.py)
 params: 4753698
 
-inputs:                     # the 18 strict actuators M3 reads (kind drives derived feats)
-  - {node: PowLH1_scope, kind: lh}          # LH power
-  - {node: PowLH2_scope, kind: lh}
-  - {node: PhaLH1_scope, kind: lh_phase}    # LH launcher phase
-  - {node: PhaLH2_scope, kind: lh_phase}
-  - {node: PowIC1_scope, kind: ic}          # IC power
-  - {node: PowIC2_scope, kind: ic}
-  - {node: PowIC3_scope, kind: ic}
-  - {node: Ip_scope,     kind: ip}          # plasma current
-  - {node: IBb_scope,    kind: pf}          # 10 PF coil currents (bottom/top)
+inputs:                     # EXACTLY these 18 columns — nothing appended (no
+                            # derived, no pe_*, no dt; see `derived` below).
+                            # Source: each shot's NPZ "X", columns selected by
+                            # node name via dcs_features.read_series -> A(nt, 18),
+                            # raw values on the native 488 Hz time base. NaN
+                            # policy: heating channels -> 0; Ip/PF (essential)
+                            # -> 0 AND the slice is masked out. Standardisation
+                            # by train-split mean/std happens in DCSWindowDataset,
+                            # not here. "kind" is snapshot-tier metadata; M3
+                            # ignores it beyond the NaN policy.
+  # — lower-hybrid heating (NaN -> 0) —
+  - {node: PowLH1_scope, kind: lh}          # LH power, launcher 1
+  - {node: PowLH2_scope, kind: lh}          # LH power, launcher 2
+  - {node: PhaLH1_scope, kind: lh_phase}    # LH launcher-1 phase
+  - {node: PhaLH2_scope, kind: lh_phase}    # LH launcher-2 phase
+  # — ion-cyclotron heating (NaN -> 0) —
+  - {node: PowIC1_scope, kind: ic}          # IC power, antenna 1
+  - {node: PowIC2_scope, kind: ic}          # IC power, antenna 2
+  - {node: PowIC3_scope, kind: ic}          # IC power, antenna 3
+  # — plasma current (essential: NaN -> drop slice) —
+  - {node: Ip_scope,     kind: ip}
+  # — PF coil currents, bottom / top (essential: NaN -> drop slice) —
+  - {node: IBb_scope,    kind: pf}
   - {node: IDb_scope,    kind: pf}
   - {node: IEb_scope,    kind: pf}
   - {node: IFb_scope,    kind: pf}
