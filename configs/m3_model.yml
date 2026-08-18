@@ -1,0 +1,82 @@
+# configs/m3_model.yml
+# M3 windowed-attention LCFS predictor — model + I/O card, in the style of
+# configs/m0_model.yml. Documentation card only: the operative training config
+# is configs/dcs_model_attn.yml (channels + hp.m3); this file records what the
+# model reads and writes, for reference alongside m0_model.yml.
+#
+# ── What is M3? ──────────────────────────────────────────────────────
+# M3 predicts the WEST LCFS from strict DCS actuators only, as a sequence:
+#   inputs  = 18 strict actuator channels (LH power/phase, IC power, Ip,
+#              10 PF coil currents) read at the native GMAG_BND time base
+#   features = raw actuators + 4 engineered (pf_norm, lh_plus_ic, cum_heat,
+#              time_rel) — no boundary history, no EFIT scalars, no pe_* or
+#              dt columns (positional information enters via --pe only)
+#   model   = ActSeqAttn — causal windowed transformer, 2048-step windows
+#              with a 512-step unscored context prefix, RoPE/UPE positional
+#              encoding selected by --pe (5 variants)
+#   output  = 34 columns per slice: 32 radii r(θ) about the per-slice
+#              GMAG_GEOM origin + the centre (Rgeom, Zgeom) — so the
+#              absolute (R, Z) LCFS is reconstructable, like M0's axis pair
+# Dataset: ProjDB/datasets/NpzGeom (V1, 488 Hz native reconstruction axis),
+#          split 607/76/76 pinned at split seed 0.
+# Selected best run: drop_f0.0_rope_time_s2 — best of the 6 rope_time runs
+#          by mean per-shot MSE on the clean-75 test shots (0.0777);
+#          clean-75 pooled CCC 0.9953.
+# ──────────────────────────────────────────────────────────────────────
+
+run: dcs_attn               # default run name (configs/dcs_model_attn.yml)
+
+model: ActSeqAttn           # windowed causal attention tier (src/ml/models.py)
+params: 4753698
+
+inputs:                     # the 18 strict actuators M3 reads (kind drives derived feats)
+  - {node: PowLH1_scope, kind: lh}          # LH power
+  - {node: PowLH2_scope, kind: lh}
+  - {node: PhaLH1_scope, kind: lh_phase}    # LH launcher phase
+  - {node: PhaLH2_scope, kind: lh_phase}
+  - {node: PowIC1_scope, kind: ic}          # IC power
+  - {node: PowIC2_scope, kind: ic}
+  - {node: PowIC3_scope, kind: ic}
+  - {node: Ip_scope,     kind: ip}          # plasma current
+  - {node: IBb_scope,    kind: pf}          # 10 PF coil currents (bottom/top)
+  - {node: IDb_scope,    kind: pf}
+  - {node: IEb_scope,    kind: pf}
+  - {node: IFb_scope,    kind: pf}
+  - {node: IXb_scope,    kind: pf}
+  - {node: IFh_scope,    kind: pf}
+  - {node: IEh_scope,    kind: pf}
+  - {node: IDh_scope,    kind: pf}
+  - {node: IBh_scope,    kind: pf}
+  - {node: IXh_scope,    kind: pf}
+
+derived:                    # engineered features (kind-driven, dcs_features.py)
+  - pf_norm                 # ||PF|| normalisation
+  - lh_plus_ic              # LH + IC heating sum
+  - cum_heat                # cumulative ∫(LH+IC)dt
+  - time_rel                # relative time within the shot
+
+output:                     # (nt, 34) target = radii + centre, per slice
+  radii: r_theta            # 32 radii r(θ) about the per-slice (Rgeom, Zgeom)
+  centre:                   # secondary outputs for absolute LCFS reconstruction
+    - rgeom
+    - zgeom
+
+pe: rope_time               # selected variant (--pe; one of rope_idx | rope_time |
+                            #   upe_idx | upe_time | upe_both; positions reach the
+                            #   model through the encoding, never input columns)
+
+windowing:                  # sequences enter as fixed-length windows
+  window: 2048              # scored + attended steps (~4.19 s at 488 Hz)
+  ctx: 512                  # attended, never scored -> stride 1536
+
+hp:                         # ActSeqAttn hyperparameters (hp.m3)
+  d_model: 256
+  heads: 8
+  depth: 6
+  ffn: 1024
+  dropout: 0.1
+  batch: 16
+  lr: 0.0003                # AdamW, cosine + 5 warm-up epochs
+  warmup: 5
+  epochs: 80
+  patience: 12
