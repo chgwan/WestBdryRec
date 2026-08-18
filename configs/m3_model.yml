@@ -6,11 +6,12 @@
 #
 # ── What is M3? ──────────────────────────────────────────────────────
 # M3 predicts the WEST LCFS from strict DCS actuators only, as a sequence:
-#   inputs  = 18 strict actuator channels (LH power/phase, IC power, Ip,
-#              10 PF coil currents) read at the native GMAG_BND time base
-#   features = raw actuators + 4 engineered (pf_norm, lh_plus_ic, cum_heat,
-#              time_rel) — no boundary history, no EFIT scalars, no pe_* or
-#              dt columns (positional information enters via --pe only)
+#   inputs  = the 18 RAW strict actuator channels (LH power/phase, IC power,
+#              Ip, 10 PF coil currents) read at the native GMAG_BND time
+#              base (dcs_features.read_series) — nothing else: no boundary
+#              history, no EFIT scalars, no pe_*/dt columns, and NO derived
+#              features (those are snapshot-tier, see `derived` below), so
+#              the model's ONLY timing information is the positional encoding
 #   model   = ActSeqAttn — causal windowed transformer, 2048-step windows
 #              with a 512-step unscored context prefix, RoPE/UPE positional
 #              encoding selected by --pe (5 variants)
@@ -49,8 +50,10 @@ inputs:                     # the 18 strict actuators M3 reads (kind drives deri
   - {node: IBh_scope,    kind: pf}
   - {node: IXh_scope,    kind: pf}
 
-derived:                    # engineered features (kind-driven, dcs_features.py)
-  - pf_norm                 # ||PF|| normalisation
+derived:                    # NOT M3 inputs — snapshot-tier only (read_snapshot,
+                            # M0/M1). Listed here for parity with m0_model.yml;
+                            # cfg["derived"] is documentation, no loader reads it.
+  - pf_norm                 # ||PF||₂ normalisation
   - lh_plus_ic              # LH + IC heating sum
   - cum_heat                # cumulative ∫(LH+IC)dt
   - time_rel                # relative time within the shot
