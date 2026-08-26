@@ -97,20 +97,33 @@ class _Attn(nn.Module):
         self.qkv = nn.Linear(d, 3 * d)
         self.proj = nn.Linear(d, d)
 
-    def forward(self, x, rope_pos, rope_freqs):
+    def forward(self, x, rope_pos, rope_freqs, attn_mask=None):
         B, L, D = x.shape
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         q, k, v = (z.view(B, L, self.h, self.dh).transpose(1, 2) for z in (q, k, v))
         if rope_pos is not None:
             q = apply_rope(q, rope_pos, rope_freqs)
             k = apply_rope(k, rope_pos, rope_freqs)
-        # is_causal=True and NO attn_mask, deliberately: a mask forces the math
-        # backend, which materialises (B, heads, L, L) -- 8.18 GiB vs 0.26 GiB
-        # measured at batch 16 / L 2048 / fp32, per layer. See spec 3.1 and
-        # tests/test_ml_attn_causal.py.
-        o = F.scaled_dot_product_attention(
-            q, k, v, is_causal=True, dropout_p=self.p if self.training else 0.0)
-        return self.proj(o.transpose(1, 2).reshape(B, L, D))
+        dropout = self.p if self.training else 0.0
+        if attn_mask is None:
+            # is_causal=True and NO attn_mask, deliberately: a mask forces the
+            # math backend, which materialises (B, heads, L, L) -- 8.18 GiB vs
+            # 0.26 GiB measured at batch 16 / L 2048 / fp32, per layer. See
+            # spec 3.1 and tests/test_ml_attn_causal.py.
+            out = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True, dropout_p=dropout)
+        else:
+            # pf-context study path only (temporal-context spec 6.3-6.4): the
+            # bool mask is the elapsed-time band, (B,1,L,L), True = attend.
+            # Passed in per forward; never a parameter or buffer.
+            if attn_mask.shape != (B, 1, L, L):
+                raise ValueError(
+                    f"attention mask must have shape {(B,1,L,L)}, "
+                    f"got {tuple(attn_mask.shape)}")
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask,
+                is_causal=False, dropout_p=dropout)
+        return self.proj(out.transpose(1, 2).reshape(B, L, D))
 
 
 class ActSeqAttn(nn.Module):
@@ -146,12 +159,18 @@ class ActSeqAttn(nn.Module):
             "rope_freqs", torch.from_numpy(inv_freqs(d // heads)).float(),
             persistent=False)
 
-    def forward(self, x, p):
+    def forward(self, x, p, attn_mask=None):
         """``x`` (B,L,n_act); ``p`` is (B,L) rope offsets or the (B,L,d) upe table.
 
         Which one is decided by ``self.pe`` and produced by ``DCSWindowDataset``; the
         rank is asserted so a variant/dataset mismatch fails loudly instead of
         broadcasting into silence.
+
+        ``attn_mask`` is the optional (B,1,L,L) bool elapsed-time band from
+        :func:`~src.ml.pf_context.layer_attention_mask` (pf-context study, spec
+        6.3); ``None`` keeps the mask-free causal default, which right padding
+        does not need. The mask is an argument, never a parameter or buffer,
+        and the same mask reaches every attention layer.
         """
         h = self.in_proj(x)
         if self.pe.startswith("upe"):
@@ -164,6 +183,6 @@ class ActSeqAttn(nn.Module):
                 f"{self.pe} needs (B,L) offsets, got {tuple(p.shape)}"
             rope_pos = p
         for at, na, ff, nf in zip(self.attn, self.ln_a, self.ff, self.ln_f):
-            h = h + at(na(h), rope_pos, self.rope_freqs)
+            h = h + at(na(h), rope_pos, self.rope_freqs, attn_mask)
             h = h + ff(nf(h))
         return self.out(self.norm(h))

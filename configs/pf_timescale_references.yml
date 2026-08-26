@@ -1,0 +1,23 @@
+version: 1
+frozen_before_final_test: false
+references:
+  - subsystem: pf_power_supply_control
+    status: unavailable
+    reason: no independently verified WEST value has been entered
+    sources: []
+    use_in_claims: false
+  - subsystem: pf_circuit_l_over_r
+    status: unavailable
+    reason: no independently verified WEST value has been entered
+    sources: []
+    use_in_claims: false
+  - subsystem: passive_vessel_eddy_current
+    status: unavailable
+    reason: no independently verified WEST value has been entered
+    sources: []
+    use_in_claims: false
+  - subsystem: controller_update_response
+    status: unavailable
+    reason: no independently verified WEST value has been entered
+    sources: []
+    use_in_claims: false

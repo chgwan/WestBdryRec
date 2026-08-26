@@ -136,3 +136,19 @@ def test_wrong_payload_rank_fails_loudly():
 def test_unknown_variant_is_rejected():
     with pytest.raises(ValueError, match="pe must be one of"):
         ActSeqAttn(n_act=5, pe="sinusoid")
+
+
+# --------------------------- pf-context Task 3: the default path is frozen ---
+def test_attn_mask_none_is_bitwise_the_default_path():
+    """The pf-context sweep adds an explicit-mask path; the default path must
+    stay the exact mask-free is_causal=True SDPA call it has always been. One
+    model state, two calls, bitwise equality. The banded-mask path itself is
+    tested in tests/test_pf_context_model.py."""
+    m = _model("rope_time", d=32, heads=4, depth=6, n_act=5)
+    torch.manual_seed(7)
+    x = torch.randn(1, 16, 5)
+    p = _payload("rope_time", 16)[None]
+    with torch.no_grad():
+        default = m(x, p)
+        explicit_none = m(x, p, attn_mask=None)
+    assert torch.equal(default, explicit_none)
