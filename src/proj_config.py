@@ -67,6 +67,15 @@ class ProjConfig(BaseSettings):
         """Trainable NPZ built from the uniform 500 Hz merge (newTrain V2)."""
         return self.proj_db_dir / "datasets" / "NpzUni500"
 
+    # --- PF ref/actual observability sidecar on the NpzGeom native time base ---
+    @property
+    def pfobs_dir(self) -> pathlib.Path:
+        return self.proj_db_dir / "datasets" / "NpzGeomPFObs"
+
+    @property
+    def pfobs_stats_dir(self) -> pathlib.Path:
+        return self.stats_dir / "pf_observability"
+
     @property
     def npz_dir(self) -> pathlib.Path:
         return self.proj_db_dir / "datasets" / "Npz"

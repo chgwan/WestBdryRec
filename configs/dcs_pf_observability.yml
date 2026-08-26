@@ -1,0 +1,22 @@
+run: pfobs
+model: ActSeqAttn
+pe: rope_time
+time_axis: native_gmag_bnd
+arms: [A, B, C, D]
+seeds: [0, 1, 2, 3, 4]
+input_width: 21
+hp:
+  m3:
+    pe: rope_time
+    d_model: 256
+    heads: 8
+    depth: 6
+    ffn: 1024
+    dropout: 0.1
+    window: 2048
+    ctx: 512
+    batch: 16
+    lr: 0.0003
+    warmup: 5
+    epochs: 80
+    patience: 12

@@ -342,15 +342,21 @@ class DCSWindowDataset(Dataset):
     number would sit a per-shot constant away from ``t / c`` -- the pair would then
     measure span-anchored-vs-ignitron-anchored, a confound, instead of index-vs-time.
     Hence ``n0 = round(time[0] / c_modal)``.
+
+    ``series_reader`` (default :func:`read_series`) swaps the feature source --
+    e.g. the PF observability arms' sidecar reader -- while the windowing,
+    masking and positional contracts above stay byte-for-byte identical.
     """
 
     def __init__(self, npz_dir, shots, cfg, ncm, mean, std, pe="rope_idx",
                  d_model=256, w=W_DEFAULT, ctx=CTX_DEFAULT,
-                 tgt_mean=None, tgt_std=None, drop_frac=0.0, drop_seed=0):
+                 tgt_mean=None, tgt_std=None, drop_frac=0.0, drop_seed=0,
+                 series_reader=None):
         if pe not in VARIANTS:
             raise ValueError(f"pe must be one of {VARIANTS}, got {pe!r}")
         self.pe, self.d_model, self.w, self.ctx = pe, int(d_model), int(w), int(ctx)
         self.drop_frac, self.drop_seed = float(drop_frac), int(drop_seed)
+        reader = series_reader or read_series
         self.mean = np.asarray(mean, float)
         self.std = np.maximum(np.asarray(std, float), 1e-6)
         self.tgt_mean = None if tgt_mean is None else np.asarray(tgt_mean, float)
@@ -361,7 +367,7 @@ class DCSWindowDataset(Dataset):
             p = pathlib.Path(npz_dir) / f"{int(s)}.npz"
             if not p.exists():
                 continue
-            A, mask = read_series(p, cfg, ncm)
+            A, mask = reader(p, cfg, ncm)
             T, finite = load_target(p)
             v = mask & finite                     # == _pred_m2's v, exactly
             if not v.any():
