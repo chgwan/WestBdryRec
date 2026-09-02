@@ -7,7 +7,10 @@ to the plasma window ``[ref-onset, ref-offset]`` and the ref slope is normalized
 by the *plateau* value (median over that window), not the whole-record median.
 
 Pipeline: ref-flat segments -> refine each edge with the actual-Ip q20 threshold
-(EAST ``get_flat_top_times``) -> total flat-top duration. Writes ``flat_top.csv``.
+(EAST ``get_flat_top_times``) -> total flat-top duration, then split the rest of
+the window into ramp-up / ramp-down gaps by the sign of the average ref slope.
+Writes ``flat_top.csv`` (per-shot summary) and ``flat_top_segments.csv``
+(per-phase rows).
 
 Importable as a package module; driven from ``scripts/run_data_pre.py``.
 """
@@ -31,6 +34,8 @@ Q_PCT = 20              # actual-Ip percentile used to refine flat-top edges
 CSV_FIELDS = ["shot", "ref_start_index", "ref_start_time", "n_segments",
               "flat_top_start", "flat_top_end", "total_flat_top_s",
               "pass_3s", "ip_peak_ka", "flag"]
+
+SEGMENT_CSV_FIELDS = ["shot", "i_segment", "start", "end", "flag"]
 
 
 def ref_start_index(ip_ref):
@@ -98,6 +103,39 @@ def refine_flat_top(t, ip_act, segments, q_pct=Q_PCT, eps=1e-7):
     return out
 
 
+def phase_segments(t, ref, i0, i1, tops):
+    """Chronological ramp-up / flat-top / ramp-down split of the plasma window.
+
+    ``tops`` are the refined flat-top ``(start_time, end_time)`` spans (see
+    :func:`refine_flat_top`). The rest of ``[t[i0], t[i1]]`` is gaps; each gap
+    is ``ramp-up`` when the ref rises across it (``ref[end] - ref[start] > 0``),
+    ``ramp-down`` otherwise. Zero-length gaps are skipped; the emitted segments
+    tile the window with shared boundaries.
+
+    Returns ``[{"i_segment", "start", "end", "flag"}, ...]`` in time order.
+    """
+    t = np.asarray(t, float)
+    ref = np.asarray(ref, float)
+
+    def gap_flag(start, end):
+        a = int(np.searchsorted(t, start))               # first sample >= start
+        b = int(np.searchsorted(t, end, "right")) - 1    # last sample <= end
+        rise = ref[b] - ref[a] if b > a else 0.0
+        return "ramp-up" if rise > 0 else "ramp-down"
+
+    spans = []
+    cursor = float(t[i0])
+    for top_start, top_end in tops:
+        if top_start > cursor:
+            spans.append((cursor, float(top_start), gap_flag(cursor, top_start)))
+        spans.append((float(top_start), float(top_end), "flat-top"))
+        cursor = float(top_end)
+    if float(t[i1]) > cursor:
+        spans.append((cursor, float(t[i1]), gap_flag(cursor, float(t[i1]))))
+    return [{"i_segment": k, "start": s, "end": e, "flag": f}
+            for k, (s, e, f) in enumerate(spans)]
+
+
 def load_ip(shot, dcs_org_dir):
     """Return ``(time, ip_ref, ip_act)`` (native A) for one shot, or None."""
     mat_file = pathlib.Path(dcs_org_dir) / f"DCS_archive_{shot}.mat"
@@ -112,8 +150,11 @@ def load_ip(shot, dcs_org_dir):
             np.asarray(d["Ip_scope_3"], float).reshape(-1))
 
 
-def flat_top_stats(shot, dcs_org_dir):
-    """Detect the flat-top for one shot; return a result dict (see CSV_FIELDS)."""
+def phase_stats(shot, dcs_org_dir):
+    """Detect the phase split for one shot; return a result dict (see CSV_FIELDS).
+
+    ``flag == "ok"`` rows additionally carry ``segments``: the
+    :func:`phase_segments` list for ``flat_top_segments.csv``."""
     loaded = load_ip(shot, dcs_org_dir)
     if loaded is None:
         return {"shot": shot, "flag": "unreadable"}
@@ -135,12 +176,13 @@ def flat_top_stats(shot, dcs_org_dir):
     total = float(sum(e - s for s, e in tops))
     return {**base, "n_segments": len(tops),
             "flat_top_start": tops[0][0], "flat_top_end": tops[-1][1],
-            "total_flat_top_s": total, "flag": "ok"}
+            "total_flat_top_s": total, "flag": "ok",
+            "segments": phase_segments(t, ref, i0, i1, tops)}
 
 
 def _stats_worker(args):
     shot, dcs_org_dir = args
-    return flat_top_stats(shot, dcs_org_dir)
+    return phase_stats(shot, dcs_org_dir)
 
 
 def _fmt(v, spec):
@@ -172,6 +214,23 @@ def write_csv(rows, path, min_s):
     print(f"  wrote {path}  ({len(rows)} shots)")
 
 
+def write_segments_csv(rows, path):
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=SEGMENT_CSV_FIELDS)
+        w.writeheader()
+        n = 0
+        for r in sorted(rows, key=lambda r: r["shot"]):
+            for seg in r.get("segments") or []:
+                w.writerow({"shot": r["shot"], "i_segment": seg["i_segment"],
+                            "start": _fmt(seg["start"], ".6f"),
+                            "end": _fmt(seg["end"], ".6f"),
+                            "flag": seg["flag"]})
+                n += 1
+    print(f"  wrote {path}  ({n} phase segments)")
+
+
 def print_summary(rows, min_s):
     flags = collections.Counter(r.get("flag") for r in rows)
     print("\nflags: " + ", ".join(f"{k}={v}" for k, v in sorted(flags.items())))
@@ -185,7 +244,7 @@ def print_summary(rows, min_s):
 
 
 def run(dcs_org_dir=None, workers=None, csv_path=None, min_s=None):
-    """Scan every DCS .mat for its Ip flat-top; write flat_top.csv.
+    """Scan every DCS .mat for its phase split; write both CSVs.
 
     Programmatic entry point (no argparse). Returns the per-shot result dicts.
     """
@@ -201,5 +260,6 @@ def run(dcs_org_dir=None, workers=None, csv_path=None, min_s=None):
 
     csv_path = csv_path or (cfg.stats_dir / "flat_top.csv")
     write_csv(rows, csv_path, min_s)
+    write_segments_csv(rows, cfg.stats_dir / "flat_top_segments.csv")
     print_summary(rows, min_s)
     return rows
