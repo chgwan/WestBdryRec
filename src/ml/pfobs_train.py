@@ -20,6 +20,7 @@ per rank (``seed + 10_000 * rank``) only after the DDP construction.
 import copy
 import dataclasses
 import functools
+import io
 import json
 import math
 import os
@@ -37,7 +38,11 @@ from .models import ActSeqAttn
 from .pf_observability import (
     ARMS, PFObsSeriesReader, load_split, run_fingerprint, series_mean_std,
 )
+from .pfobs_provenance import normalization_stats_sha256
 from .target import N_OUT, target_mean_std
+from ..utils import (
+    PublicationIOError, durable_publish_bytes, read_regular_nofollow,
+)
 
 # The fixed base-model contract: the four arms are comparable only under the
 # identical model, positional encoding and time axis, so those values (and the
@@ -205,20 +210,70 @@ def _bcast_array(values, dist_env, dtype):
     return dist_broadcast(t, dist_env).cpu().numpy()
 
 
-def _atomic_torch_save(obj, path):
+def _preflight_training_destination(path, *, label):
     path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    torch.save(obj, tmp)
-    os.replace(tmp, path)
+    if os.path.lexists(path):
+        read_regular_nofollow(path, label=label)
 
 
-def _atomic_json_dump(obj, path):
-    path = pathlib.Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2, sort_keys=True))
-    os.replace(tmp, path)
+def publish_training_artifacts(out_dir, artifact, validation_summary):
+    """Publish ``m3.pt`` then its JSON identity, both immutable and durable."""
+    out_dir = pathlib.Path(out_dir)
+    artifact_path = out_dir / "m3.pt"
+    validation_path = out_dir / "validation.json"
+    # Reject every redirected/broken/nonregular destination before committing
+    # either member, so the identity-last pair never starts from hostile state.
+    _preflight_training_destination(
+        artifact_path, label="Work 2 training artifact")
+    _preflight_training_destination(
+        validation_path, label="Work 2 validation identity")
+
+    artifact_buffer = io.BytesIO()
+    torch.save(artifact, artifact_buffer)
+    artifact_bytes = artifact_buffer.getvalue()
+    validation_bytes = json.dumps(
+        validation_summary, indent=2, sort_keys=True).encode("utf-8")
+
+    def validate_artifact(payload):
+        try:
+            loaded = torch.load(
+                io.BytesIO(payload), map_location="cpu", weights_only=False)
+        except Exception as exc:
+            raise PublicationIOError(
+                f"cannot reload complete Work 2 m3.pt bytes: {exc}") from exc
+        if (not isinstance(loaded, dict)
+                or loaded.get("run_fingerprint")
+                != artifact.get("run_fingerprint")
+                or loaded.get("validation_summary") != validation_summary):
+            raise PublicationIOError(
+                "complete Work 2 m3.pt bytes fail fingerprint/identity validation")
+        return loaded
+
+    def validate_identity(payload):
+        try:
+            loaded = json.loads(payload.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise PublicationIOError(
+                f"cannot parse complete Work 2 validation identity: {exc}") \
+                from exc
+        if loaded != validation_summary:
+            raise PublicationIOError(
+                "Work 2 validation identity differs from the artifact summary")
+        return loaded
+
+    artifact_status = durable_publish_bytes(
+        artifact_path,
+        artifact_bytes,
+        validator=validate_artifact,
+        state_label="Work 2 training artifact",
+    )
+    identity_status = durable_publish_bytes(
+        validation_path,
+        validation_bytes,
+        validator=validate_identity,
+        state_label="Work 2 validation identity",
+    )
+    return artifact_status, identity_status
 
 
 def _available_shots(npz_dir, sidecar_dir):
@@ -229,8 +284,18 @@ def _available_shots(npz_dir, sidecar_dir):
     return stems(npz_dir) & stems(sidecar_dir)
 
 
+def training_normalization(npz_dir, sidecar_dir, train_shots, arm):
+    """The four train-only normalization arrays for one Work 2 arm."""
+    reader = PFObsSeriesReader(pathlib.Path(sidecar_dir), arm)
+    mean, std = series_mean_std(npz_dir, train_shots, reader)
+    tgt_mean, tgt_std = target_mean_std(npz_dir, train_shots)
+    return mean, std, tgt_mean, tgt_std
+
+
 def train_one(npz_dir, sidecar_dir, config_path, split_path, arm, seed,
-              out_dir, dist_env, epochs_override=None):
+              out_dir, dist_env, epochs_override=None, normalization=None,
+              run_fingerprint_payload=None,
+              source_audit_identity_sha256="absent"):
     """Train one ``(arm, seed)``; rank 0 writes ``<out_dir>/m3.pt`` + JSON.
 
     Sequence: validate the base contract and the split (every listed shot must
@@ -247,6 +312,8 @@ def train_one(npz_dir, sidecar_dir, config_path, split_path, arm, seed,
     construction) each rank's dropout stream as ``seed + 10_000 * rank``. It
     never touches the split. ``epochs_override`` replaces ``hp.m3.epochs``
     (smoke runs); the artifact's ``hp`` records the epochs that actually ran.
+    Rank 0 stores one exact ``validation_summary`` in ``m3.pt`` and serializes
+    that same mapping as ``validation.json``.
     """
     npz_dir = pathlib.Path(npz_dir)
     sidecar_dir = pathlib.Path(sidecar_dir)     # the reader does not coerce str
@@ -265,10 +332,14 @@ def train_one(npz_dir, sidecar_dir, config_path, split_path, arm, seed,
     hp["epochs"] = n_ep                       # the artifact records what ran
     dev = dist_env.device
 
-    # train-shot-only normalization, computed once on rank 0 and broadcast
+    # Train-shot-only normalization. The runner may precompute rank 0's arrays
+    # for resume fingerprinting; direct callers retain the historical local
+    # computation. Every rank receives byte-identical typed arrays.
     if dist_env.is_main:
-        mean, std = series_mean_std(npz_dir, split.train, reader)
-        tgt_mean, tgt_std = target_mean_std(npz_dir, split.train)
+        stats = (training_normalization(
+            npz_dir, sidecar_dir, split.train, arm)
+                 if normalization is None else normalization)
+        mean, std, tgt_mean, tgt_std = stats
     else:
         mean = np.zeros(INPUT_WIDTH, np.float32)
         std = np.ones(INPUT_WIDTH, np.float32)
@@ -278,6 +349,14 @@ def train_one(npz_dir, sidecar_dir, config_path, split_path, arm, seed,
     std = _bcast_array(std, dist_env, np.float32)
     tgt_mean = _bcast_array(tgt_mean, dist_env, np.float64)
     tgt_std = _bcast_array(tgt_std, dist_env, np.float64)
+    normalization_hash = normalization_stats_sha256(
+        mean, std, tgt_mean, tgt_std)
+    if (run_fingerprint_payload is not None
+            and run_fingerprint_payload.get("normalization_sha256")
+            != normalization_hash):
+        raise RuntimeError(
+            "run_fingerprint normalization_sha256 does not match the arrays "
+            "broadcast to training")
 
     kw = dict(cfg={}, ncm={}, mean=mean, std=std, pe=pe,
               d_model=hpm["d_model"], w=hpm["window"], ctx=hpm["ctx"],
@@ -362,24 +441,38 @@ def train_one(npz_dir, sidecar_dir, config_path, split_path, arm, seed,
     n_params = int(sum(p.numel() for p in raw.parameters()))
 
     if dist_env.is_main:
-        fp = run_fingerprint(arm, int(seed), config_path, split_path,
-                             sidecar_dir, npz_dir)
-        _atomic_torch_save(
-            {"state": raw.state_dict(), "n_act": ds_tr.n_act, "hp": hp,
-             "pe": pe, "mean": mean, "std": std, "tgt_mean": tgt_mean,
-             "tgt_std": tgt_std, "n_out": N_OUT,
-             "best_val_mse": float(best), "seed": int(seed), "arm": arm,
-             "run_fingerprint": fp, "n_params": n_params,
-             "world_size": int(dist_env.world_size),
-             "global_batch": int(hpm["batch"])},
-            pathlib.Path(out_dir) / "m3.pt")
-        _atomic_json_dump(
-            {"arm": arm, "seed": int(seed), "epochs": n_ep,
-             "stop_epoch": int(ep), "best_val_mse": float(best),
-             "n_windows_train": len(ds_tr), "n_windows_val": len(ds_va),
-             "n_params": n_params, "world_size": int(dist_env.world_size),
-             "global_batch": int(hpm["batch"]), "run_fingerprint": fp},
-            pathlib.Path(out_dir) / "validation.json")
+        fp = run_fingerprint_payload
+        if fp is None:
+            fp = run_fingerprint(
+                arm, int(seed), config_path, split_path, sidecar_dir, npz_dir,
+                normalization_sha256=normalization_hash,
+                source_audit_identity_sha256=(
+                    source_audit_identity_sha256))
+        validation_summary = {
+            "arm": arm,
+            "seed": int(seed),
+            "epochs": n_ep,
+            "stop_epoch": int(ep),
+            "best_val_mse": float(best),
+            "n_windows_train": len(ds_tr),
+            "n_windows_val": len(ds_va),
+            "n_params": n_params,
+            "world_size": int(dist_env.world_size),
+            "global_batch": int(hpm["batch"]),
+            "run_fingerprint": fp,
+        }
+        artifact = {
+            "state": raw.state_dict(), "n_act": ds_tr.n_act, "hp": hp,
+            "pe": pe, "mean": mean, "std": std, "tgt_mean": tgt_mean,
+            "tgt_std": tgt_std, "n_out": N_OUT,
+            "normalization_sha256": normalization_hash,
+            "best_val_mse": float(best), "seed": int(seed), "arm": arm,
+            "run_fingerprint": fp, "n_params": n_params,
+            "world_size": int(dist_env.world_size),
+            "global_batch": int(hpm["batch"]),
+            "validation_summary": validation_summary,
+        }
+        publish_training_artifacts(out_dir, artifact, validation_summary)
     dist_barrier(dist_env)
     return {"best_val_mse": float(best), "arm": arm, "seed": int(seed),
             "pe": pe, "n_act": ds_tr.n_act, "n_params": n_params,

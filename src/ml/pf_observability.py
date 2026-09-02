@@ -34,22 +34,43 @@ TIME_AXIS_TOKEN = "native_gmag_bnd"
 # the caller's current directory.
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-# Modules whose bytes pin a run: the fixed model, positional encoding,
-# dataset reader, this arm-assembly module, the PF-observability
-# training/inference modules, the native metrics module and the matrix
-# runner (the last four are created by later tasks of this plan). Every
-# entry must exist when a fingerprint is computed -- a missing entry is a
-# loud failure, not a silently narrower hash.
+# Complete Work 2 source closure. Every member is required: removal or rename
+# fails before a production fingerprint can silently narrow.
 SOURCE_FILES = (
     "src/ml/models.py",
     "src/ml/pos_encoding.py",
     "src/ml/dataset.py",
+    "src/data/imas_flat_top.py",
+    "src/ml/dcs_features.py",
+    "src/ml/target.py",
+    "src/ml/axis_frame.py",
+    "src/ml/metrics.py",
+    "src/ml/predictions.py",
+    "src/data/build_pf_observability.py",
+    "src/proj_config.py",
+    "src/utils.py",
     "src/ml/pf_observability.py",
+    "src/ml/publication_split.py",
+    "src/ml/pfobs_provenance.py",
     "src/ml/pfobs_train.py",
     "src/ml/pfobs_infer.py",
     "src/ml/native_metrics.py",
     "scripts/run_pf_observability.py",
+    "scripts/score_pf_observability.py",
+    "scripts/audit_pf_observability.py",
+    "exploration/pf_observability_analysis.py",
+    "scripts/nscc_python_entry.py",
 )
+
+
+def existing_source_files(project_root=PROJECT_ROOT):
+    """Return the complete strict Work 2 source closure, sorted."""
+    root = pathlib.Path(project_root)
+    missing = [rel for rel in SOURCE_FILES if not (root / rel).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Work 2 source closure is missing pinned files: {missing}")
+    return tuple(sorted(SOURCE_FILES))
 
 
 def assemble_arm(pf_ref, pf_actual, ip_ref, arm):
@@ -214,23 +235,47 @@ def load_split(path, available_shots=None, project_root=PROJECT_ROOT):
         **lists)
 
 
-def run_fingerprint(arm, seed, config_path, split_path, sidecar_dir,
-                    npz_dir, project_root=PROJECT_ROOT):
-    """The pinned provenance mapping stored in every training artifact.
+def _canonical_payload_sha256(payload):
+    encoded = json.dumps(
+        payload, ensure_ascii=False, allow_nan=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
-    Hashes everything a run depends on: the fixed base-model contract
-    values, the arm/seed, the config and split files, the sidecar and
-    target dataset metas, the optional shot-metadata file and slice-strata
-    tree, and the bytes of every :data:`SOURCE_FILES` module. Any change
-    to any pinned input moves at least one field.
-    """
+
+def _canonical_shots_sha256(shots):
+    encoded = "".join(
+        f"{int(shot)}\n" for shot in sorted(int(s) for s in shots)
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_complete_work2_fingerprint(
+    *,
+    arm,
+    seed,
+    config_path,
+    split_path,
+    sidecar_dir,
+    npz_dir,
+    normalization_sha256,
+    source_audit_identity_sha256,
+    project_root=PROJECT_ROOT,
+):
+    """Build the complete normalization/audit-aware Work 2 fingerprint."""
     split = load_split(split_path, project_root=project_root)
+    manifest = json.loads(pathlib.Path(split_path).read_text())
+    excluded = manifest.get("excluded")
+    prior_access = manifest.get("prior_test_access")
     return {
         "model": "ActSeqAttn",
         "pe": "rope_time",
         "time_axis": "native_gmag_bnd",
         "arm": arm,
         "seed": int(seed),
+        "split_name": str(split.name),
+        "split_version": int(split.version),
+        "claim_scope": manifest.get("claim_scope", "absent"),
+        "split_strategy": manifest.get("split_strategy", "absent"),
         "config_sha256": sha256_file(config_path),
         "split_sha256": sha256_file(split_path),
         "sidecar_meta_sha256": sha256_file(
@@ -243,5 +288,41 @@ def run_fingerprint(arm, seed, config_path, split_path, sidecar_dir,
         "slice_strata_sha256": (
             sha256_tree(split.slice_strata_dir)
             if split.slice_strata_dir is not None else "absent"),
-        "source_sha256": sha256_tree(project_root, include=SOURCE_FILES),
+        "excluded_shots_sha256": (
+            _canonical_shots_sha256(excluded)
+            if excluded is not None else "absent"),
+        "prior_test_access_sha256": (
+            _canonical_payload_sha256(prior_access)
+            if prior_access is not None else "absent"),
+        "normalization_sha256": str(normalization_sha256),
+        "source_audit_identity_sha256": str(
+            source_audit_identity_sha256),
+        "source_sha256": sha256_tree(
+            project_root, include=existing_source_files(project_root)),
     }
+
+
+def run_fingerprint(
+    arm,
+    seed,
+    config_path,
+    split_path,
+    sidecar_dir,
+    npz_dir,
+    *,
+    normalization_sha256,
+    source_audit_identity_sha256,
+    project_root=PROJECT_ROOT,
+):
+    """The complete pinned provenance mapping stored in every Work 2 run."""
+    return build_complete_work2_fingerprint(
+        arm=arm,
+        seed=seed,
+        config_path=config_path,
+        split_path=split_path,
+        sidecar_dir=sidecar_dir,
+        npz_dir=npz_dir,
+        normalization_sha256=normalization_sha256,
+        source_audit_identity_sha256=source_audit_identity_sha256,
+        project_root=project_root,
+    )

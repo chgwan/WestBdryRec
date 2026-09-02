@@ -90,39 +90,48 @@ import pathlib  # noqa: E402
 
 from .pf_observability import sha256_file, sha256_tree  # noqa: E402
 
-# The single source of truth for what a pf-context run's source hash pins:
-# the fixed model, the positional encoding, the 34-column target, the
-# upstream PF-observability/fingerprint/native-metric modules, every new
-# context data/training/inference module, and both runner scripts.
-# ``src/ml/pfctx_infer.py`` and ``scripts/score_pf_context_sweep.py`` are
-# created by Task 6 and do not exist yet; ``existing_source_files`` hashes
-# only the entries present, so the two files join the digest automatically
-# when they land -- the frozen list itself never changes.
+# Complete recursive Work 3 source closure. Every member is required so a
+# removal cannot silently narrow a production fingerprint.
 PFCTX_SOURCE_FILES = (
     "src/ml/models.py",
     "src/ml/pos_encoding.py",
+    "src/ml/dataset.py",
+    "src/data/imas_flat_top.py",
+    "src/ml/dcs_features.py",
     "src/ml/target.py",
+    "src/ml/axis_frame.py",
+    "src/ml/metrics.py",
+    "src/proj_config.py",
+    "src/utils.py",
     "src/ml/pf_observability.py",
-    "src/ml/native_metrics.py",
+    "src/ml/publication_split.py",
+    "src/ml/pfobs_provenance.py",
     "src/ml/pfobs_train.py",
     "src/ml/pfobs_infer.py",
+    "src/ml/native_metrics.py",
     "src/ml/pf_context.py",
+    "src/ml/pfctx_provenance.py",
     "src/ml/pfctx_data.py",
     "src/ml/pfctx_train.py",
     "src/ml/pfctx_infer.py",
     "scripts/run_pf_context_sweep.py",
     "scripts/score_pf_context_sweep.py",
+    "exploration/pf_context_analysis.py",
+    "scripts/nscc_python_entry.py",
 )
 
 
 def existing_source_files(source_root):
-    """The PFCTX_SOURCE_FILES entries that exist under ``source_root``,
-    sorted. A pinned file that has not been created yet is simply absent;
-    once it exists it is hashed, so the digest moves when any covered file
-    is added, removed, renamed or changed."""
+    """Return the complete strict Work 3 source closure, sorted."""
     root = pathlib.Path(source_root)
-    return tuple(sorted(str(name) for name in PFCTX_SOURCE_FILES
-                        if (root / name).is_file()))
+    missing = [
+        str(name) for name in PFCTX_SOURCE_FILES
+        if not (root / name).is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"Work 3 source closure is missing pinned files: {missing}")
+    return tuple(sorted(str(name) for name in PFCTX_SOURCE_FILES))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -161,33 +170,113 @@ def normalization_stats_sha256(feature_mean, feature_std, target_mean,
     return digest.hexdigest()
 
 
-def context_run_fingerprint(config_path, split_path, target_meta,
-                            sidecar_meta, source_root, context_seconds,
-                            context_label, seed, normalization_hash):
-    """The pinned provenance mapping of one (context, seed) run.
+_COMMON_FINGERPRINT_FIELDS = {
+    "study", "arm", "model", "pe", "time_axis", "config_sha256",
+    "split_sha256", "target_meta_sha256", "sidecar_meta_sha256",
+    "shot_metadata_sha256", "slice_strata_sha256",
+    "availability_audit_sha256", "source_sha256",
+}
 
-    File-level sha256s of the frozen config and the split manifest (the
-    artifact's content-level hashes complement, not contradict, these), the
-    dataset/sidecar meta hashes, the four-array normalization hash, and the
-    bytes of every present PFCTX_SOURCE_FILES module. Any change to any
-    pinned input moves at least one field."""
-    return {
+
+def context_common_fingerprint(config_path, split_path, target_meta,
+                               sidecar_meta, source_root, normalization_hash=None,
+                               *, shot_metadata=None, slice_strata_dir=None,
+                               availability_audit_sha256="absent",
+                               precomputed_hashes=None):
+    """Hash invocation-common Work 3 inputs exactly once.
+
+    ``precomputed_hashes`` lets publication training reuse hashes freshly
+    validated from the availability-audit snapshot. It may supply any hash
+    field but never changes the emitted schema.
+    """
+    precomputed = dict(precomputed_hashes or {})
+
+    def file_hash(field, path):
+        return str(precomputed[field]) if field in precomputed else sha256_file(path)
+
+    def tree_hash(field, root, include=None):
+        if field in precomputed:
+            return str(precomputed[field])
+        return sha256_tree(root, include=include)
+
+    common = {
         "study": "pf_context",
         "arm": "B",
         "model": "ActSeqAttn",
         "pe": "rope_time",
         "time_axis": "native_gmag_bnd",
+        "config_sha256": file_hash("config_sha256", config_path),
+        "split_sha256": file_hash("split_sha256", split_path),
+        "target_meta_sha256": file_hash("target_meta_sha256", target_meta),
+        "sidecar_meta_sha256": file_hash("sidecar_meta_sha256", sidecar_meta),
+        "shot_metadata_sha256": (
+            file_hash("shot_metadata_sha256", shot_metadata)
+            if shot_metadata is not None else "absent"),
+        "slice_strata_sha256": (
+            tree_hash("slice_strata_sha256", slice_strata_dir)
+            if slice_strata_dir is not None else "absent"),
+        "availability_audit_sha256": str(availability_audit_sha256),
+        "source_sha256": tree_hash(
+            "source_sha256", source_root,
+            include=existing_source_files(source_root)),
+    }
+    if normalization_hash is not None:
+        common["normalization_sha256"] = str(normalization_hash)
+    return common
+
+
+def context_run_fingerprint_from_common(
+        common_fingerprint, *, context_seconds, context_label, seed,
+        normalization_hash=None):
+    """Add only cell identity to one cached common fingerprint mapping."""
+    common = dict(common_fingerprint)
+    allowed = _COMMON_FINGERPRINT_FIELDS | {"normalization_sha256"}
+    if not _COMMON_FINGERPRINT_FIELDS <= set(common) or not set(common) <= allowed:
+        raise ValueError("incomplete or foreign Work 3 common fingerprint")
+    normalized = (common.get("normalization_sha256")
+                  if normalization_hash is None else str(normalization_hash))
+    if normalized is None:
+        raise ValueError("normalization_hash is required for a run fingerprint")
+    return {
+        "study": common["study"],
+        "arm": common["arm"],
+        "model": common["model"],
+        "pe": common["pe"],
+        "time_axis": common["time_axis"],
         "context_label": str(context_label),
         "context_seconds": float(context_seconds),
         "seed": int(seed),
-        "config_sha256": sha256_file(config_path),
-        "split_sha256": sha256_file(split_path),
-        "target_meta_sha256": sha256_file(target_meta),
-        "sidecar_meta_sha256": sha256_file(sidecar_meta),
-        "normalization_sha256": str(normalization_hash),
-        "source_sha256": sha256_tree(
-            source_root, include=existing_source_files(source_root)),
+        "config_sha256": common["config_sha256"],
+        "split_sha256": common["split_sha256"],
+        "target_meta_sha256": common["target_meta_sha256"],
+        "sidecar_meta_sha256": common["sidecar_meta_sha256"],
+        "shot_metadata_sha256": common["shot_metadata_sha256"],
+        "slice_strata_sha256": common["slice_strata_sha256"],
+        "normalization_sha256": normalized,
+        "availability_audit_sha256": common["availability_audit_sha256"],
+        "source_sha256": common["source_sha256"],
     }
+
+
+def context_run_fingerprint(config_path, split_path, target_meta,
+                            sidecar_meta, source_root, context_seconds,
+                            context_label, seed, normalization_hash, *,
+                            shot_metadata=None, slice_strata_dir=None,
+                            availability_audit_sha256="absent"):
+    """Build the complete fingerprint without a caller-owned common cache."""
+    common = context_common_fingerprint(
+        config_path, split_path, target_meta, sidecar_meta, source_root,
+        normalization_hash,
+        shot_metadata=shot_metadata,
+        slice_strata_dir=slice_strata_dir,
+        availability_audit_sha256=availability_audit_sha256,
+    )
+    return context_run_fingerprint_from_common(
+        common,
+        context_seconds=context_seconds,
+        context_label=context_label,
+        seed=seed,
+    )
 
 
 # ── Task 7: validation saturation selection and frozen final inference ─

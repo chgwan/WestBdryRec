@@ -29,11 +29,13 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
+import io
 import json
 import math
 import os
 import pathlib
 import time
+from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -45,9 +47,10 @@ from .models import ActSeqAttn
 from .pf_context import (
     CONTEXT_LEVELS, existing_source_files, layer_attention_mask,
 )
-from .pf_observability import sha256_file, sha256_tree
+from .pf_observability import sha256_file
 from .pfctx_data import PFContextDataset, pad_context_collate
 from .pfobs_train import DistEnv, init_dist  # noqa: F401  (re-exported)
+from ..utils import PublicationIOError, durable_publish_bytes
 
 INPUT_WIDTH = 21          # the fixed Arm B block: [zero(10), actual(10), Ip]
 N_OUT = 34                # 32 radii + absolute (Rgeom, Zgeom)
@@ -492,7 +495,7 @@ REQUIRED_ARTIFACT_KEYS = (
     "stop_epoch", "epochs_completed", "n_train_windows",
     "n_validation_windows", "elapsed_seconds", "seconds_per_epoch",
     "mean_sequence_tokens", "peak_memory_bytes", "attention_backend_ops",
-    "fingerprints",
+    "run_fingerprint", "scored_index_sha256", "fingerprints",
 )
 
 
@@ -511,19 +514,63 @@ def _validate_artifact_payload(artifact, config):
     return artifact
 
 
+def _validate_runner_fingerprint(run_fingerprint_payload, result, context,
+                                 seed, feature_stats, target_stats):
+    if not isinstance(run_fingerprint_payload, Mapping):
+        raise ValueError("the runner fingerprint must be a mapping")
+    fingerprint = run_fingerprint_payload
+    required = {
+        "study", "arm", "model", "pe", "time_axis", "context_label",
+        "context_seconds", "seed", "config_sha256", "split_sha256",
+        "target_meta_sha256", "sidecar_meta_sha256",
+        "shot_metadata_sha256", "slice_strata_sha256",
+        "normalization_sha256", "availability_audit_sha256",
+        "source_sha256",
+    }
+    if set(fingerprint) != required:
+        raise ValueError(
+            "the runner fingerprint must contain exactly the complete Work 3 "
+            "fields")
+    expected = {
+        "study": "pf_context",
+        "arm": "B",
+        "model": "ActSeqAttn",
+        "pe": "rope_time",
+        "time_axis": "native_gmag_bnd",
+        "context_label": str(context.label),
+        "context_seconds": float(context.seconds),
+        "seed": int(seed),
+        "target_meta_sha256": str(result["target_meta_sha256"]),
+        "sidecar_meta_sha256": str(result["sidecar_meta_sha256"]),
+        "normalization_sha256": normalization_sha256(
+            feature_stats, target_stats),
+    }
+    differing = [
+        field for field, value in expected.items()
+        if fingerprint.get(field) != value
+    ]
+    if differing:
+        raise ValueError(
+            "the runner fingerprint disagrees with the trainer inputs "
+            f"({', '.join(sorted(differing))})")
+    return run_fingerprint_payload
+
+
 def write_context_artifact_atomic(output_dir, model, result, context, seed,
                                   split, config, feature_stats, target_stats,
-                                  world_size, effective, accumulation):
+                                  world_size, effective, accumulation,
+                                  run_fingerprint_payload):
     """Rank 0 writes ``<output_dir>/m3.pt`` atomically.
 
-    ``output_dir`` IS the run directory (the runner passes
-    ``ProjDB/trains/<run_name>``); this writer creates it. Serialization goes
-    to a sibling ``m3.pt.building``; the rename happens only after the file
-    is reloaded and validated (keys + state reconstruction), so a partially
-    written or corrupt artifact is never published. A failed validation
-    leaves the ``.building`` file for diagnosis.
+    ``output_dir`` is the run directory. Serialization is validated from its
+    complete in-memory bytes, then a unique same-directory ``O_EXCL`` temporary
+    is file-fsynced and hard-linked no-replace to ``m3.pt``. The destination is
+    never overwritten or rolled back; exact duplicate bytes are a no-op.
     """
     hp = config["hp"]
+    run_fingerprint_payload = _validate_runner_fingerprint(
+        run_fingerprint_payload, result, context, seed,
+        feature_stats, target_stats)
     artifact = {
         "study": "pf_context", "arm": "B", "model": "ActSeqAttn",
         "pe": "rope_time", "time_axis": "native_gmag_bnd",
@@ -555,30 +602,45 @@ def write_context_artifact_atomic(output_dir, model, result, context, seed,
         "mean_sequence_tokens": float(result["mean_sequence_tokens"]),
         "peak_memory_bytes": int(result["peak_memory_bytes"]),
         "attention_backend_ops": list(result["attention_backend_ops"]),
-        "fingerprints": {
-            "config_sha256": config_content_sha256(config),
-            "split_sha256": split_content_sha256(split),
-            "source_sha256": sha256_tree(PROJECT_ROOT, include=SOURCE_FILES),
-            "sidecar_meta_sha256": str(result["sidecar_meta_sha256"]),
-            "target_meta_sha256": str(result["target_meta_sha256"]),
-            "normalization_sha256": normalization_sha256(
-                feature_stats, target_stats),
-            "scored_index_sha256": str(result["scored_index_sha256"]),
-        },
+        "run_fingerprint": run_fingerprint_payload,
+        "scored_index_sha256": str(result["scored_index_sha256"]),
+        # Compatibility alias for the pre-Task-9 inference/scorer readers. It
+        # is the same complete runner mapping, never a trainer re-derivation.
+        "fingerprints": run_fingerprint_payload,
     }
     output_dir = pathlib.Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "m3.pt"
-    building = path.with_name(path.name + ".building")
-    torch.save(artifact, building)
-    reloaded = torch.load(building, map_location="cpu", weights_only=False)
-    _validate_artifact_payload(reloaded, config)
-    os.replace(building, path)
+    buffer = io.BytesIO()
+    torch.save(artifact, buffer)
+    artifact_bytes = buffer.getvalue()
+
+    def validate_complete_bytes(payload):
+        try:
+            reloaded = torch.load(
+                io.BytesIO(payload), map_location="cpu", weights_only=False)
+            _validate_artifact_payload(reloaded, config)
+        except PublicationIOError:
+            raise
+        except Exception as exc:
+            raise PublicationIOError(
+                f"Work 3 artifact reload validation failed: {exc}") from exc
+        if reloaded.get("run_fingerprint") != run_fingerprint_payload:
+            raise PublicationIOError(
+                "Work 3 artifact runner fingerprint changed during serialization")
+        return reloaded
+
+    durable_publish_bytes(
+        path,
+        artifact_bytes,
+        validator=validate_complete_bytes,
+        state_label="Work 3 training artifact",
+    )
     return path
 
 
 def train_one(context, seed, split, config, target_dir, sidecar_dir,
-              output_dir, dist_env, feature_stats, target_stats):
+              output_dir, dist_env, feature_stats, target_stats,
+              run_fingerprint_payload=None):
     validate_context_config(config)
     if context.label not in {x.label for x in CONTEXT_LEVELS}:
         raise ValueError(f"unfrozen context {context.label!r}")
@@ -592,6 +654,8 @@ def train_one(context, seed, split, config, target_dir, sidecar_dir,
             int(hp["production_gradient_accumulation"]) != accumulation):
         raise ValueError(
             "production accumulation does not preserve global batch 16")
+    if run_fingerprint_payload is None:
+        raise ValueError("train_one requires the fresh runner fingerprint")
     train_loader, validation_loader = build_context_loaders(
         target_dir, sidecar_dir, split.train, split.validation,
         context, feature_stats, target_stats,
@@ -623,5 +687,5 @@ def train_one(context, seed, split, config, target_dir, sidecar_dir,
         write_context_artifact_atomic(
             output_dir, model, result, context, seed, split, config,
             feature_stats, target_stats, dist_env.world_size,
-            effective, accumulation)
+            effective, accumulation, run_fingerprint_payload)
     return result

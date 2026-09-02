@@ -28,9 +28,12 @@ from __future__ import annotations
 import csv
 import dataclasses
 import datetime
+import io
 import json
 import os
 import pathlib
+import stat
+import time
 
 import numpy as np
 import torch
@@ -58,6 +61,25 @@ PER_SHOT_HEADER = [
     "elongation_abs", "triangularity_upper_abs", "triangularity_lower_abs",
     "ccc", "radii_mse", "centre_mse",
 ]
+RUN_METADATA_FIELDS = {
+    "study", "run_name", "context_label", "nominal_samples",
+    "context_seconds", "per_layer_seconds", "score_block", "seed", "depth",
+    "world_size", "effective_global_batch", "best_val_mse", "stop_epoch",
+    "epochs_completed", "device", "scored_at", "n_shots", "shots",
+    "n_pred_rows", "row_order_contract", "fingerprints", "floor",
+    "transaction_provenance", "transaction_sha256", "artifact_sha256",
+    "fingerprint_json_sha256", "validation_selection_sha256",
+    "availability_audit_sha256", "work2_marker_sha256", "floor_sha256",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class ScoredArtifactPayload:
+    rows: tuple[dict[str, object], ...]
+    prediction_bytes: bytes
+    metrics_bytes: bytes
+    metadata: dict[str, object]
+    metadata_bytes: bytes
 
 
 def validate_artifact_contract(artifact):
@@ -230,9 +252,8 @@ def prediction_key(shot, kind):
     return f"shot_{int(shot)}_{kind}"
 
 
-def save_final_predictions(path, predictions):
-    """Compressed per-shot predictions, exact row indices, float64
-    timestamps; row order is the exact scored order."""
+def final_predictions_bytes(predictions):
+    """Return deterministic compressed prediction bytes in shot insertion order."""
     arrays = {}
     for shot, pred in predictions.items():
         arrays[prediction_key(shot, "prediction")] = np.asarray(
@@ -241,7 +262,15 @@ def save_final_predictions(path, predictions):
             pred.row_index, np.int64)
         arrays[prediction_key(shot, "timestamp")] = np.asarray(
             pred.timestamp, np.float64)
-    np.savez_compressed(path, **arrays)
+    buffer = io.BytesIO()
+    np.savez_compressed(buffer, **arrays)
+    return buffer.getvalue()
+
+
+def save_final_predictions(path, predictions):
+    """Compressed per-shot predictions, exact row indices, float64
+    timestamps; row order is the exact scored order."""
+    pathlib.Path(path).write_bytes(final_predictions_bytes(predictions))
 
 
 def load_final_predictions(path):
@@ -277,20 +306,178 @@ def _atomic_json_dump(obj, path):
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=2, sort_keys=True))
+    tmp.write_text(json.dumps(
+        obj, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True) + "\n")
     os.replace(tmp, path)
+
+
+def _csv_bytes(header, rows):
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        buffer, fieldnames=header, extrasaction="raise", lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8")
 
 
 def _write_csv(path, header, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=header, extrasaction="raise")
-        writer.writeheader()
-        writer.writerows(rows)
+    path.write_bytes(_csv_bytes(header, rows))
 
 
-def score_artifact(artifact, shots, target_dir, sidecar_dir, theta,
-                   output_dir, device="cpu", floor=None):
+def _canonical_json_bytes(obj):
+    return (json.dumps(
+        obj, ensure_ascii=False, allow_nan=False,
+        indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _open_nofollow_directory(path):
+    path = pathlib.Path(path)
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"cannot open final cell directory {path}: {exc}") from exc
+    if not stat.S_ISDIR(before.st_mode):
+        raise RuntimeError(f"{path}: final cell must be a real no-follow directory")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    opened = os.fstat(descriptor)
+    if ((opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or not stat.S_ISDIR(opened.st_mode)):
+        os.close(descriptor)
+        raise RuntimeError(f"{path}: final cell changed while opening")
+    return descriptor
+
+
+def _read_child_bytes(directory_fd, name, *, display):
+    descriptor = os.open(
+        name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        dir_fd=directory_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RuntimeError(f"{display}: final member must be regular")
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _publish_cell_member(
+        directory_fd, output_dir, name, payload, *, validator, state_label):
+    payload = bytes(payload)
+    try:
+        existing = _read_child_bytes(
+            directory_fd, name, display=pathlib.Path(output_dir) / name)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        validator(existing)
+        if existing != payload:
+            raise RuntimeError(
+                f"{output_dir}/{name}: existing {state_label} differs")
+        return
+    temp_name = f".{name}.{os.getpid()}.{time.time_ns()}.tmp"
+    descriptor = None
+    try:
+        descriptor = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o644,
+            dir_fd=directory_fd,
+        )
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(f"short write while publishing {state_label}")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        temp_payload = _read_child_bytes(
+            directory_fd, temp_name,
+            display=pathlib.Path(output_dir) / temp_name)
+        validator(temp_payload)
+        try:
+            os.link(
+                temp_name, name,
+                src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            existing = _read_child_bytes(
+                directory_fd, name, display=pathlib.Path(output_dir) / name)
+            validator(existing)
+            if existing != payload:
+                raise RuntimeError(
+                    f"{output_dir}/{name}: concurrent {state_label} differs")
+        os.fsync(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temp_name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _validate_prediction_bytes(payload, shots):
+    expected = tuple(int(shot) for shot in shots)
+    with np.load(io.BytesIO(bytes(payload)), allow_pickle=False) as data:
+        keys = tuple(
+            prediction_key(shot, kind)
+            for shot in expected
+            for kind in ("prediction", "row_index", "timestamp"))
+        if tuple(data.files) != keys:
+            raise RuntimeError("prediction NPZ keys/order changed")
+        for shot in expected:
+            prediction = data[prediction_key(shot, "prediction")]
+            rows = data[prediction_key(shot, "row_index")]
+            timestamps = data[prediction_key(shot, "timestamp")]
+            if (prediction.ndim != 2 or prediction.shape[1] != 34
+                    or rows.shape != (prediction.shape[0],)
+                    or timestamps.shape != (prediction.shape[0],)):
+                raise RuntimeError(f"shot {shot}: prediction member shapes changed")
+            if (prediction.dtype != np.float32 or rows.dtype != np.int64
+                    or timestamps.dtype != np.float64):
+                raise RuntimeError(f"shot {shot}: prediction member dtypes changed")
+            if (not np.isfinite(prediction).all()
+                    or not np.isfinite(timestamps).all()
+                    or not np.all(np.diff(rows) > 0)):
+                raise RuntimeError(f"shot {shot}: invalid prediction values/rows")
+    return True
+
+
+def _validate_metrics_bytes(payload, shots):
+    reader = csv.DictReader(io.StringIO(bytes(payload).decode("utf-8"), newline=""))
+    if tuple(reader.fieldnames or ()) != tuple(PER_SHOT_HEADER):
+        raise RuntimeError("metrics header changed")
+    rows = list(reader)
+    if [int(row["shot"]) for row in rows] != [int(shot) for shot in shots]:
+        raise RuntimeError("metrics shot membership/order changed")
+    for row in rows:
+        for field in PER_SHOT_HEADER[4:]:
+            if not np.isfinite(float(row[field])):
+                raise RuntimeError(f"metrics {field} is non-finite")
+    return rows
+
+
+def score_artifact_payload(
+        artifact, shots, target_dir, sidecar_dir, theta,
+        device="cpu", floor=None, *, transaction_provenance=None,
+        transaction_sha256=None, artifact_sha256=None,
+        fingerprint_json_sha256=None, validation_selection_sha256=None,
+        availability_audit_sha256=None, work2_marker_sha256=None,
+        floor_sha256=None):
     """Predict every shot of one artifact and write its staged cell.
 
     Predictions are gathered on exactly the common-valid rows, scored with
@@ -310,11 +497,8 @@ def score_artifact(artifact, shots, target_dir, sidecar_dir, theta,
         row.update(context=str(artifact["context_label"]),
                    seed=int(artifact["seed"]), shot=int(shot))
         rows.append(row)
-    output_dir = pathlib.Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    save_final_predictions(output_dir / "m3_pred.npz", predictions)
-    _write_csv(output_dir / "per_shot_metrics.csv", PER_SHOT_HEADER, rows)
-    _atomic_json_dump({
+    ordered_shots = [int(s) for s in sorted(int(s) for s in shots)]
+    metadata = {
         "study": "pf_context",
         "run_name": (f"pfctx_{artifact['context_label']}"
                      f"_s{int(artifact['seed'])}"),
@@ -334,11 +518,61 @@ def score_artifact(artifact, shots, target_dir, sidecar_dir, theta,
         "scored_at": datetime.datetime.now(
             datetime.timezone.utc).isoformat(),
         "n_shots": len(rows),
-        "shots": [int(s) for s in sorted(int(s) for s in shots)],
+        "shots": ordered_shots,
         "n_pred_rows": int(sum(r["n_slices"] for r in rows)),
         "row_order_contract": ("strictly increasing unique native rows "
                               "equal to each shot's common-valid indices"),
         "fingerprints": dict(artifact["fingerprints"]),
         "floor": floor,
-    }, output_dir / "run_metadata.json")
-    return rows
+        "transaction_provenance": transaction_provenance,
+        "transaction_sha256": transaction_sha256,
+        "artifact_sha256": artifact_sha256,
+        "fingerprint_json_sha256": fingerprint_json_sha256,
+        "validation_selection_sha256": validation_selection_sha256,
+        "availability_audit_sha256": availability_audit_sha256,
+        "work2_marker_sha256": work2_marker_sha256,
+        "floor_sha256": floor_sha256,
+    }
+    prediction_bytes = final_predictions_bytes(predictions)
+    metrics_bytes = _csv_bytes(PER_SHOT_HEADER, rows)
+    metadata_bytes = _canonical_json_bytes(metadata)
+    if transaction_provenance is not None:
+        required = {
+            "transaction_sha256": transaction_sha256,
+            "artifact_sha256": artifact_sha256,
+            "fingerprint_json_sha256": fingerprint_json_sha256,
+            "validation_selection_sha256": validation_selection_sha256,
+            "availability_audit_sha256": availability_audit_sha256,
+            "work2_marker_sha256": work2_marker_sha256,
+            "floor_sha256": floor_sha256,
+        }
+        missing = sorted(key for key, value in required.items() if value is None)
+        if missing:
+            raise RuntimeError(
+                f"publication cell metadata provenance is incomplete: {missing}")
+    _validate_prediction_bytes(prediction_bytes, ordered_shots)
+    _validate_metrics_bytes(metrics_bytes, ordered_shots)
+    if set(metadata) != RUN_METADATA_FIELDS:
+        raise RuntimeError("run metadata schema construction changed")
+    return ScoredArtifactPayload(
+        rows=tuple(rows),
+        prediction_bytes=prediction_bytes,
+        metrics_bytes=metrics_bytes,
+        metadata=metadata,
+        metadata_bytes=metadata_bytes,
+    )
+
+
+def score_artifact(
+        artifact, shots, target_dir, sidecar_dir, theta, output_dir,
+        device="cpu", floor=None, **provenance):
+    """Compatibility wrapper: build complete bytes, then publish one cell."""
+    payload = score_artifact_payload(
+        artifact, shots, target_dir, sidecar_dir, theta,
+        device=device, floor=floor, **provenance)
+    output_dir = pathlib.Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "m3_pred.npz").write_bytes(payload.prediction_bytes)
+    (output_dir / "per_shot_metrics.csv").write_bytes(payload.metrics_bytes)
+    (output_dir / "run_metadata.json").write_bytes(payload.metadata_bytes)
+    return list(payload.rows)
