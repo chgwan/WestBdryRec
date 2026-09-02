@@ -1,5 +1,5 @@
 version: 1
-frozen_before_final_test: false
+frozen_before_final_test: true
 references:
   - subsystem: pf_power_supply_control
     status: unavailable

@@ -40,12 +40,14 @@ observation of the physical boundary). An existing provenance file is
 never overwritten.
 
 Usage:
-  python scripts/audit_pf_observability.py --split configs/splits/pfobs_random_pilot.json
+  python scripts/audit_pf_observability.py \
+    --split configs/splits/pfobs_random_pilot.json --manifest-mode generic
 """
 import argparse
 import csv
 import io
 import json
+import os
 import pathlib
 import sys
 
@@ -55,9 +57,32 @@ import h5py  # noqa: E402  (opened only inside build_one)
 import numpy as np  # noqa: E402
 
 from src.data.build_pf_observability import PF_SCOPES, build_one  # noqa: E402
-from src.ml.pf_observability import load_split  # noqa: E402
+from src.ml.pfobs_provenance import (  # noqa: E402
+    ValidationFreezeLock, build_source_audit_identity,
+)
+from src.ml.publication_split import (  # noqa: E402
+    PUBLICATION_MANIFEST_PATH,
+    PUBLICATION_SIDECAR_DIR,
+    PUBLICATION_TARGET_DIR,
+    PUBLICATION_WORK2_AUDIT_IDENTITY,
+    PUBLICATION_WORK2_MARKER,
+    PUBLICATION_WORK2_STATS_ROOT,
+    load_split_for_mode,
+    require_publication_paths,
+)
 from src.proj_config import get_proj_config  # noqa: E402
-from src.utils import pmap  # noqa: E402
+from src.utils import (  # noqa: E402
+    PublicationIOError, durable_publish_bytes, pmap, read_regular_nofollow,
+)
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+NPZ_DIR = PUBLICATION_TARGET_DIR
+MERGED_DIR = REPO_ROOT / "ProjDB/datasets/MergedH5Gmag"
+SIDECAR_DIR = PUBLICATION_SIDECAR_DIR
+STATS_ROOT = PUBLICATION_WORK2_STATS_ROOT
+AUDIT_IDENTITY = PUBLICATION_WORK2_AUDIT_IDENTITY
+SPLIT = PUBLICATION_MANIFEST_PATH
+FINAL_MARKER = PUBLICATION_WORK2_MARKER
 
 LAG_MAX = 64        # cross-correlation search window, native samples (~131 ms)
 FLAT_RUN_MIN = 8    # shortest run of identical consecutive values, samples
@@ -68,6 +93,18 @@ PROVENANCE_TEMPLATE = {
     "evidence": [],
     "claim_limit": "observability_of_the_GMAG_BND_reconstruction_product",
 }
+IDENTITY_NAME = "source_audit_identity.json"
+
+
+def _load_manifest(path, manifest_mode, available_shots=None):
+    """Load the requested split contract once before the source audit."""
+    return load_split_for_mode(
+        path,
+        manifest_mode=manifest_mode,
+        available_shots=available_shots,
+        project_root=REPO_ROOT,
+    )
+
 
 CSV_COLUMNS = (
     "scope", "n_shots", "n_rows", "n_common",
@@ -237,43 +274,71 @@ def compute_rows(results):
     return rows, n_rows, n_common
 
 
-def run(split_path, npz_dir=None, merged_dir=None, stats_dir=None,
-        workers=1):
+def _run_audit_locked(split_path, npz_dir=None, merged_dir=None, sidecar_dir=None,
+                      stats_dir=None, audit_identity=None, workers=1,
+                      manifest_mode="publication"):
     """Audit ``split.train + split.validation`` (never ``split.test``).
 
-    Returns ``{shots, n_shots, n_rows, n_common, csv_path,
-    provenance_path, provenance_written}``.
+    Publication mode requires exactly 674 successful shots and atomically
+    writes the split-bound identity last, after the CSV and reconstruction
+    provenance. Generic mode preserves the archived warning-and-pool behavior.
     """
     cfg = get_proj_config()
     npz_dir = pathlib.Path(npz_dir) if npz_dir else cfg.npzgeom_dir
     merged_dir = (pathlib.Path(merged_dir) if merged_dir
                   else cfg.mergedh5_gmag_dir)
+    sidecar_dir = (pathlib.Path(sidecar_dir) if sidecar_dir
+                   else cfg.pfobs_dir)
     stats_dir = (pathlib.Path(stats_dir) if stats_dir
                  else cfg.pfobs_stats_dir)
+    identity_path = (pathlib.Path(audit_identity) if audit_identity
+                     else stats_dir / IDENTITY_NAME)
+    if identity_path.parent != stats_dir:
+        raise ValueError(
+            "--audit-identity must live in --stats-dir beside source_audit.csv "
+            "and reconstruction_provenance.json")
 
     meta_shots = sorted(int(s["shot"]) for s in json.loads(
         (npz_dir / "meta.json").read_text())["shots"])
     available = {s for s in meta_shots
                  if (npz_dir / f"{s}.npz").is_file()
                  and (merged_dir / f"{s}.h5").is_file()}
-    split = load_split(split_path, available_shots=available)
+    split = _load_manifest(
+        split_path, manifest_mode, available_shots=available)
     shots = [int(s) for s in split.train + split.validation]  # test NEVER
+    if manifest_mode == "publication" and len(shots) != 674:
+        raise RuntimeError(
+            f"publication source audit requires 674 train+validation shots, "
+            f"got {len(shots)}")
+    if manifest_mode == "publication" and os.path.lexists(identity_path):
+        try:
+            read_regular_nofollow(
+                identity_path, label="Work 2 source audit identity")
+        except PublicationIOError as exc:
+            raise RuntimeError(str(exc)) from exc
 
     jobs = [(shot, npz_dir / f"{shot}.npz", merged_dir / f"{shot}.h5")
             for shot in shots]
     results = pmap(_audit_shot, jobs, workers, "audit_pf_observability")
     unauditable = [(r["shot"], r["error"]) for r in results if not r["ok"]]
     if unauditable:
-        # A shot without an exact native span is a DATA FINDING, not a
-        # repair job (spec 5.2: never nearest-neighbour or interpolate;
-        # 5.3: stop before training and diagnose source availability).
-        # The audit reports it and pools only the auditable shots; the
-        # Task-1 sidecar build remains the enforcement point.
         detail = "; ".join(f"{s}: {e}" for s, e in unauditable[:5])
-        print(f"WARNING: {len(unauditable)}/{len(shots)} train+validation "
-              f"shots are not auditable ({detail}"
-              + (f" (+{len(unauditable) - 5} more)" if len(unauditable) > 5
-                 else "") + ")")
+        message = (f"{len(unauditable)}/{len(shots)} train+validation shots "
+                   f"are unauditable ({detail}"
+                   + (f" (+{len(unauditable) - 5} more)"
+                      if len(unauditable) > 5 else "") + ")")
+        if manifest_mode == "publication":
+            raise RuntimeError(
+                "publication source audit rejects every unauditable shot: "
+                + message)
+        # Generic diagnostics retain the historical report-and-pool path.
+        print("WARNING: " + message.replace("are unauditable", "are not auditable"))
+    result_shots = [int(r["shot"]) for r in results]
+    if (len(results) != len(shots) or len(set(result_shots)) != len(shots)
+            or set(result_shots) != set(shots)):
+        raise RuntimeError(
+            "source audit worker results do not cover exactly the requested "
+            "train+validation shots")
     results = [r for r in results if r["ok"]]
     if not results:
         raise RuntimeError(
@@ -282,45 +347,187 @@ def run(split_path, npz_dir=None, merged_dir=None, stats_dir=None,
     unauditable_shots = [s for s, _e in unauditable]
 
     rows, n_rows, n_common = compute_rows(results)
-    stats_dir.mkdir(parents=True, exist_ok=True)
     csv_path = stats_dir / "source_audit.csv"
-    with open(csv_path, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(CSV_COLUMNS)
-        for row in rows:
-            w.writerow([_fmt(row[c]) for c in CSV_COLUMNS])
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(CSV_COLUMNS)
+    for row in rows:
+        writer.writerow([_fmt(row[c]) for c in CSV_COLUMNS])
+    csv_payload = buffer.getvalue().encode("utf-8")
 
     prov_path = stats_dir / "reconstruction_provenance.json"
-    if prov_path.exists():
+    if os.path.lexists(prov_path):
+        try:
+            provenance_payload = read_regular_nofollow(
+                prov_path, label="Work 2 reconstruction provenance")
+        except PublicationIOError as exc:
+            raise RuntimeError(str(exc)) from exc
         provenance_written = False
     else:
-        prov_path.write_text(json.dumps(PROVENANCE_TEMPLATE, indent=2))
+        provenance_payload = json.dumps(
+            PROVENANCE_TEMPLATE, indent=2).encode("utf-8")
         provenance_written = True
+
+    identity = None
+    identity_payload = None
+    if manifest_mode == "publication":
+        identity = build_source_audit_identity(
+            split_path=split_path,
+            split=split,
+            npz_dir=npz_dir,
+            sidecar_dir=sidecar_dir,
+            source_audit_csv=csv_path,
+            reconstruction_provenance=prov_path,
+            source_audit_csv_bytes=csv_payload,
+            reconstruction_provenance_bytes=provenance_payload,
+            audited_shots=[r["shot"] for r in results],
+            unauditable_shots=unauditable_shots,
+            project_root=REPO_ROOT,
+        )
+        identity_payload = (
+            json.dumps(identity, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+
+    # Preflight every destination before the first commit. Broken symlinks,
+    # live symlinks, directories, and other nonregular state fail closed.
+    for path, label in (
+            (csv_path, "Work 2 source audit CSV"),
+            (prov_path, "Work 2 reconstruction provenance"),
+            (identity_path, "Work 2 source audit identity")):
+        if manifest_mode != "publication" and path == identity_path:
+            continue
+        if os.path.lexists(path):
+            try:
+                read_regular_nofollow(path, label=label)
+            except PublicationIOError as exc:
+                raise RuntimeError(str(exc)) from exc
+
+    durable_publish_bytes(
+        csv_path, csv_payload, state_label="Work 2 source audit CSV")
+    provenance_status = durable_publish_bytes(
+        prov_path, provenance_payload,
+        state_label="Work 2 reconstruction provenance")
+    provenance_written = provenance_status == "created"
+    identity_written = False
+    if manifest_mode == "publication":
+        identity_status = durable_publish_bytes(
+            identity_path, identity_payload,
+            state_label="Work 2 source audit identity")
+        identity_written = identity_status == "created"  # commit LAST
+
     return {"shots": shots, "n_shots": len(shots),
             "audited_shots": [r["shot"] for r in results],
             "n_audited": len(results), "n_unauditable": len(unauditable),
             "unauditable_shots": unauditable_shots, "n_rows": n_rows,
             "n_common": n_common, "csv_path": str(csv_path),
             "provenance_path": str(prov_path),
-            "provenance_written": provenance_written}
+            "provenance_written": provenance_written,
+            "audit_identity_path": str(identity_path),
+            "audit_identity_written": identity_written}
 
 
-def main():
+def run(split_path, npz_dir=None, merged_dir=None, sidecar_dir=None,
+        stats_dir=None, audit_identity=None, workers=1,
+        manifest_mode="publication"):
+    """Run the publication audit under the state-family exclusive lock."""
+    if manifest_mode == "publication":
+        npz_dir = pathlib.Path(npz_dir) if npz_dir else pathlib.Path(NPZ_DIR)
+        merged_dir = pathlib.Path(
+            merged_dir) if merged_dir else pathlib.Path(MERGED_DIR)
+        sidecar_dir = pathlib.Path(
+            sidecar_dir) if sidecar_dir else pathlib.Path(SIDECAR_DIR)
+        stats_dir = pathlib.Path(
+            stats_dir) if stats_dir else pathlib.Path(STATS_ROOT)
+        identity_path = pathlib.Path(
+            audit_identity) if audit_identity else pathlib.Path(AUDIT_IDENTITY)
+    else:
+        cfg = get_proj_config()
+        npz_dir = pathlib.Path(npz_dir) if npz_dir else cfg.npzgeom_dir
+        merged_dir = (
+            pathlib.Path(merged_dir) if merged_dir else cfg.mergedh5_gmag_dir)
+        sidecar_dir = pathlib.Path(
+            sidecar_dir) if sidecar_dir else cfg.pfobs_dir
+        stats_dir = pathlib.Path(stats_dir) if stats_dir else cfg.pfobs_stats_dir
+        identity_path = pathlib.Path(
+            audit_identity) if audit_identity else stats_dir / IDENTITY_NAME
+        return _run_audit_locked(
+            split_path, npz_dir=npz_dir, merged_dir=merged_dir,
+            sidecar_dir=sidecar_dir, stats_dir=stats_dir,
+            audit_identity=identity_path, workers=workers,
+            manifest_mode=manifest_mode)
+
+    require_publication_paths(
+        "publication",
+        {
+            "split": split_path,
+            "npz_dir": npz_dir,
+            "merged_dir": merged_dir,
+            "sidecar_dir": sidecar_dir,
+            "stats_dir": stats_dir,
+            "audit_identity": identity_path,
+        },
+        {
+            "split": SPLIT,
+            "npz_dir": NPZ_DIR,
+            "merged_dir": MERGED_DIR,
+            "sidecar_dir": SIDECAR_DIR,
+            "stats_dir": STATS_ROOT,
+            "audit_identity": AUDIT_IDENTITY,
+        },
+    )
+    marker = pathlib.Path(STATS_ROOT) / "FINAL_TEST_EVALUATED.json"
+    if os.path.lexists(marker):
+        raise RuntimeError(
+            f"{marker} exists: canonical publication state is globally final")
+    if os.path.lexists(identity_path):
+        try:
+            read_regular_nofollow(
+                identity_path, label="Work 2 source audit identity")
+        except PublicationIOError as exc:
+            raise RuntimeError(str(exc)) from exc
+    with ValidationFreezeLock(stats_dir) as audit_lock:
+        audit_lock.assert_held()
+        if os.path.lexists(marker):
+            raise RuntimeError(
+                f"{marker} exists: canonical publication state is globally final")
+        return _run_audit_locked(
+            split_path, npz_dir=npz_dir, merged_dir=merged_dir,
+            sidecar_dir=sidecar_dir, stats_dir=stats_dir,
+            audit_identity=identity_path, workers=workers,
+            manifest_mode=manifest_mode)
+
+
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--split", required=True,
                     help="frozen split manifest JSON (train+validation only)")
+    ap.add_argument("--manifest-mode", choices=("publication", "generic"),
+                    default="publication",
+                    help="strict publication bundle validation (default) or "
+                         "explicit archived generic-manifest loading")
     ap.add_argument("--workers", type=int, default=4,
                     help="parallel per-shot loaders (default 4)")
     ap.add_argument("--npz-dir", default=None,
                     help="override the NpzGeom target dir")
     ap.add_argument("--merged-dir", default=None,
                     help="override the MergedH5Gmag source dir")
+    ap.add_argument("--sidecar-dir", default=None,
+                    help="override the NpzGeomPFObs sidecar dir whose dataset "
+                         "metadata is bound into the publication identity")
     ap.add_argument("--stats-dir", default=None,
                     help="override ProjDB/Stats/pf_observability")
-    args = ap.parse_args()
+    ap.add_argument("--audit-identity", default=None,
+                    help="publication source-audit identity output (default: "
+                         "<stats-dir>/source_audit_identity.json)")
+    return ap
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
     summary = run(split_path=args.split, npz_dir=args.npz_dir,
-                  merged_dir=args.merged_dir, stats_dir=args.stats_dir,
-                  workers=args.workers)
+                  merged_dir=args.merged_dir, sidecar_dir=args.sidecar_dir,
+                  stats_dir=args.stats_dir, audit_identity=args.audit_identity,
+                  workers=args.workers, manifest_mode=args.manifest_mode)
     prov = ("written (conservative template)" if summary["provenance_written"]
             else "already present, left untouched")
     unaudited = ""
@@ -333,6 +540,8 @@ def main():
           f"({summary['n_rows']} rows, {summary['n_common']} common) -> "
           f"{summary['csv_path']}")
     print(f"provenance: {summary['provenance_path']}: {prov}")
+    if summary["audit_identity_written"]:
+        print(f"audit identity: {summary['audit_identity_path']} written last")
 
 
 if __name__ == "__main__":
