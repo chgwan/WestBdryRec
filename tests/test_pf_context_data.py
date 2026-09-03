@@ -361,7 +361,6 @@ def test_n_rho_64_derives_circle_radii(tmp_path):
     ok = s.score_valid
     assert ok[10] is np.False_ or not ok[10]          # bad row stays unscored
     assert np.allclose(s.target[ok][:, :64], 0.45, atol=1e-6)
-    assert np.allclose(s.target[ok][:, 64:], s.target[ok][:, 64:])  # centre passthrough
     # ... and the passthrough columns really are the fixture centre
     assert np.allclose(s.target[ok][:, 64], np.float32(2.4))
     assert np.allclose(s.target[ok][:, 65], np.float32(0.05))
@@ -395,6 +394,8 @@ def test_a64_config_pins_exploratory_contract():
         cfg = yaml.safe_load(f)
     assert cfg["exploratory"] is True
     assert cfg["n_rho"] == 64
+    assert cfg["input_width"] == 21
+    assert cfg["score_block"] == 512
     assert [c["label"] for c in cfg["contexts"]] == ["h0512"]
     assert cfg["seeds"] == [0]
     assert (cfg["study"], cfg["arm"], cfg["model"], cfg["pe"],

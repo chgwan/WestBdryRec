@@ -63,12 +63,19 @@ FROZEN_32THETA_FLOOR_MEDIAN_MM = 2.156773
 # table (per-shot value convention = mean over slices, then the CSV column).
 FLOOR_SELFCHECK_TOL_MM = 1e-3
 
-# Seed-light claim limit (docs/works2_3_progress.md), quoted verbatim in every
-# results document of this study.
+# Claim limits (binding), spec §1 of
+# docs/superpowers/specs/2026-09-03-dense-angle-retrain-design.md, quoted
+# verbatim in every results document of this study.
 CLAIM_LIMIT_QUOTE = (
-    "Future v2 results quantify operating-shot variability for one fixed, "
-    "hash-addressed training run per experimental arm. They do not estimate "
-    "neural-training seed variance.")
+    "- Exploratory, one seed, one context. Results quantify operating-shot\n"
+    "  variability for one fixed training run; they do not estimate seed\n"
+    "  variance and support no confirmatory claim.\n"
+    "- Denser targets are a **linear-on-polyline resampling** of the same\n"
+    "  ~32 native samples. No new measured information is introduced; part of\n"
+    "  any improvement is representational and mechanical. The dense-`n_rho`\n"
+    "  floor is reported beside model error and never subtracted.\n"
+    "- The frozen v1 verdicts, selections, markers, and artifacts are untouched\n"
+    "  and remain the only publication evidence.")
 
 REQUIRED_A64_KEYS = (
     "state", "n_act", "n_out", "n_rho", "depth", "hp", "feature_mean",
@@ -148,15 +155,16 @@ def load_artifact(artifact_path):
 def build_model(art):
     """Rebuild the exploratory ``ActSeqAttn`` from a validated artifact.
 
-    ``pe`` is not recorded by the a64 driver, which pins ``rope_time`` (the
-    frozen base contract); the strict state-dict load makes any shape drift
-    loud.
+    ``pe`` comes from the artifact (the a64 driver records the config's
+    ``pe``); the ``get`` fallback keeps pre-fix artifacts -- a training job
+    may already be queued or running -- evaluating correctly at the frozen
+    base contract's ``rope_time``.
     """
     hp = art["hp"]
     model = ActSeqAttn(n_act=int(art["n_act"]), n_out=int(art["n_out"]),
                        d=hp["d_model"], heads=hp["heads"],
                        depth=int(art["depth"]), ffn=hp["ffn"],
-                       dropout=hp["dropout"], pe="rope_time")
+                       dropout=hp["dropout"], pe=art.get("pe", "rope_time"))
     model.load_state_dict(art["state"])
     return model.eval()
 
@@ -458,7 +466,7 @@ def write_results_md(path, *, artifact_path, art, shots, n_pred_rows,
         " mm (median) -- mechanical, never subtracted from the effect\n")
 
     add("## Claim limits (binding)\n")
-    add("> " + CLAIM_LIMIT_QUOTE + "\n")
+    add("> " + CLAIM_LIMIT_QUOTE.replace("\n", "\n> ") + "\n")
     add(f"This a64 run is exactly one such single fixed, hash-addressed "
         "training run (config/split sha256 above; context "
         f"`{art['context_label']}`, seed {int(art['seed'])}, "

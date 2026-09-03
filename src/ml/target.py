@@ -101,7 +101,8 @@ def radii_from_polyline(bnd, center, theta):
 
     For every angle the ray ``center + t·d`` is intersected with every
     polyline edge ``a + u·e`` (2x2 solve via cross products); the smallest
-    positive ``t`` with ``0 <= u < 1`` is the radius. Intersection points
+    positive ``t`` with ``u`` in ``[-1e-9, 1+1e-9]`` (vertex slack) is the
+    radius. Intersection points
     lie exactly on the polyline (linear on the hit edge — no smoothing).
     A non-finite input, or any angle with no hit (non-star-shaped slice),
     returns an all-NaN row, matching the representation's star-shape

@@ -93,6 +93,7 @@ def test_driver_smoke_world1_cpu(tmp_path, monkeypatch):
     assert art["study"] == "a64_exploratory"
     assert art["n_rho"] == 64 and art["context_label"] == "h0128"
     assert art["seed"] == 0 and art["n_act"] == 21
+    assert art["pe"] == "rope_time"
     # later tasks rebuild model and attention masks from the artifact alone
     assert art["depth"] == 6
     assert art["hp"]["epochs"] == 1

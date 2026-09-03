@@ -113,7 +113,7 @@ def main(argv=None):
     config = yaml.safe_load(pathlib.Path(args.config).read_text())
     if not config.get("exploratory"):
         raise SystemExit("refusing to run: config lacks exploratory: true")
-    n_rho = int(args.n_rho or config["n_rho"])
+    n_rho = int(args.n_rho) if args.n_rho is not None else int(config["n_rho"])
     hp = dict(config["hp"])
     if args.epochs is not None:
         hp["epochs"] = int(args.epochs)
@@ -157,7 +157,7 @@ def main(argv=None):
                     n_act=config["input_width"], n_out=n_out_for(n_rho),
                     d=hp["d_model"], heads=hp["heads"], depth=hp["depth"],
                     ffn=hp["ffn"], dropout=hp["dropout"],
-                    pe="rope_time").to(dist_env.device)
+                    pe=config["pe"]).to(dist_env.device)
                 ddp_model = wrap_ddp(model, dist_env)
                 optimizer = torch.optim.AdamW(
                     ddp_model.parameters(), lr=hp["lr"], weight_decay=1e-5)
@@ -177,6 +177,7 @@ def main(argv=None):
                         "study": "a64_exploratory", "exploratory": True,
                         "n_act": config["input_width"],
                         "n_out": n_out_for(n_rho), "n_rho": n_rho,
+                        "pe": config["pe"],
                         "depth": int(hp["depth"]),
                         "hp": dict(hp),
                         "context_label": label, "seed": int(seed),
