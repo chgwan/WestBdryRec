@@ -1,0 +1,33 @@
+exploratory: true
+n_rho: 64
+study: pf_context
+arm: B
+model: ActSeqAttn
+pe: rope_time
+time_axis: native_gmag_bnd
+input_width: 21
+score_block: 512
+cadence_reference_seconds: 0.002048
+contexts:
+  - {label: h0512, nominal_samples: 512, seconds: 1.046528}
+seeds: [0]
+hp:
+  d_model: 256
+  heads: 8
+  depth: 6
+  ffn: 1024
+  dropout: 0.1
+  effective_global_batch: 16
+  microbatch_per_rank: 4
+  production_gradient_accumulation: 1
+  lr: 0.0003
+  warmup: 5
+  epochs: 80
+  patience: 12
+  gradient_clip: 1.0
+selection:
+  anchor: h2048
+  practical_margin_mm: 1.0
+  validation_family_alpha: 0.05
+  bootstrap_resamples: 10000
+  required_seed_agreement: 4

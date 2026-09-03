@@ -387,3 +387,24 @@ def test_dataset_and_loaders_pass_n_rho_through(tmp_path):
         feature_mean=np.zeros(21), feature_std=np.ones(21),
         target_mean=np.zeros(66), target_std=np.ones(66), n_rho=64)
     assert ds64[0].target.shape[1] == 66
+
+
+# ── Task 3: the exploratory 64-angle config's drift guard ──
+def test_a64_config_pins_exploratory_contract():
+    with open("configs/dcs_pf_context_a64.yml") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["exploratory"] is True
+    assert cfg["n_rho"] == 64
+    assert [c["label"] for c in cfg["contexts"]] == ["h0512"]
+    assert cfg["seeds"] == [0]
+    assert (cfg["study"], cfg["arm"], cfg["model"], cfg["pe"],
+            cfg["time_axis"]) == ("pf_context", "B", "ActSeqAttn",
+                                  "rope_time", "native_gmag_bnd")
+    assert cfg["hp"] == {
+        "d_model": 256, "heads": 8, "depth": 6, "ffn": 1024,
+        "dropout": 0.1, "effective_global_batch": 16,
+        "microbatch_per_rank": 4, "production_gradient_accumulation": 1,
+        "lr": 0.0003, "warmup": 5, "epochs": 80, "patience": 12,
+        "gradient_clip": 1.0,
+    }
+    assert cfg["selection"]["anchor"] == "h2048"   # unchanged bookkeeping
