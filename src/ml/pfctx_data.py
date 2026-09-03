@@ -22,7 +22,7 @@ from torch.utils.data import Dataset
 from .pf_context import SCORE_BLOCK, scored_windows
 from .pf_observability import assemble_arm
 from .pos_encoding import modal_cadence
-from .target import load_target
+from .target import load_target, radii_from_polyline, uniform_theta
 
 
 @dataclasses.dataclass(frozen=True)
@@ -34,7 +34,7 @@ class ContextSeries:
     time: np.ndarray
 
 
-def load_context_series(target_path, sidecar_dir) -> ContextSeries:
+def load_context_series(target_path, sidecar_dir, n_rho=None) -> ContextSeries:
     target_path = pathlib.Path(target_path)
     sidecar_path = pathlib.Path(sidecar_dir) / target_path.name
     with np.load(sidecar_path) as d:
@@ -49,6 +49,27 @@ def load_context_series(target_path, sidecar_dir) -> ContextSeries:
         raise ValueError(
             f"{target_path.stem}: sidecar/target native time mismatch")
     target, target_finite = load_target(target_path)
+    if n_rho is not None and int(n_rho) != target.shape[1] - 2:
+        # Replace the stored radii with r(theta) ray-cast from bnd_RZ about
+        # each slice's own centre at a fresh uniform angle grid; the centre
+        # columns pass through unchanged.  The stored finite mask stays a
+        # prerequisite: a row the quality filters rejected is never revived
+        # by derivation, and a derived row is dropped again when any of its
+        # new radii comes out non-finite (non-star-shaped slice).
+        with np.load(target_path) as d:
+            if "bnd_RZ" not in d.files:
+                raise ValueError(
+                    f"{target_path.stem}: n_rho={int(n_rho)} derivation "
+                    "requires bnd_RZ in the target npz")
+            bnd = np.asarray(d["bnd_RZ"], np.float64)
+        center = target[:, -2:]
+        theta = uniform_theta(int(n_rho))
+        radii = np.full((bnd.shape[0], len(theta)), np.nan)
+        for i in range(bnd.shape[0]):
+            if target_finite[i]:
+                radii[i] = radii_from_polyline(bnd[i], center[i], theta)
+        target = np.concatenate([radii, center], axis=1)
+        target_finite = target_finite & np.isfinite(target).all(axis=1)
     history_valid = np.isfinite(actual).all(1) & np.isfinite(ip_ref).all(1)
     score_valid = common_valid & target_finite
     features = assemble_arm(ref, actual, ip_ref, "B")
@@ -88,8 +109,9 @@ class ContextBatch:
 class PFContextDataset(Dataset):
     def __init__(self, target_dir, sidecar_dir, shots, context,
                  feature_mean, feature_std, target_mean, target_std,
-                 score_block=SCORE_BLOCK):
+                 score_block=SCORE_BLOCK, n_rho=None):
         self.context = context
+        self.n_rho = None if n_rho is None else int(n_rho)
         self.feature_mean = np.asarray(feature_mean, np.float32)
         self.feature_std = np.maximum(
             np.asarray(feature_std, np.float32), 1e-6)
@@ -101,7 +123,7 @@ class PFContextDataset(Dataset):
         self.index = []
         for shot in map(int, shots):
             path = pathlib.Path(target_dir) / f"{shot}.npz"
-            s = load_context_series(path, sidecar_dir)
+            s = load_context_series(path, sidecar_dir, n_rho=self.n_rho)
             series_index = len(self.series)
             self.series.append((shot, s))
             # the modal cadence is a pure function of s.time: compute it once
