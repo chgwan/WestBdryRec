@@ -423,3 +423,17 @@ def test_a128_config_pins_exploratory_contract():
                                   "rope_time", "native_gmag_bnd")
     assert cfg["input_width"] == 21 and cfg["score_block"] == 512
     assert cfg["hp"]["d_model"] == 256 and cfg["hp"]["epochs"] == 80
+
+
+def test_a256_config_pins_exploratory_contract():
+    with open("configs/dcs_pf_context_a256.yml") as f:
+        cfg = yaml.safe_load(f)
+    assert cfg["exploratory"] is True
+    assert cfg["n_rho"] == 256
+    assert [c["label"] for c in cfg["contexts"]] == ["h0512"]
+    assert cfg["seeds"] == [0]
+    assert (cfg["study"], cfg["arm"], cfg["model"], cfg["pe"],
+            cfg["time_axis"]) == ("pf_context", "B", "ActSeqAttn",
+                                  "rope_time", "native_gmag_bnd")
+    assert cfg["input_width"] == 21 and cfg["score_block"] == 512
+    assert cfg["hp"]["d_model"] == 256 and cfg["hp"]["epochs"] == 80
