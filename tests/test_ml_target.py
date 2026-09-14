@@ -80,3 +80,67 @@ def test_split_outputs():
     assert np.array_equal(centre[:, 0], P[:, N_RHO])
     with pytest.raises(ValueError, match="columns"):
         split_outputs(np.zeros((2, N_RHO)))
+
+
+# ── dense-angle derivation (spec 2026-09-03 §2.1) ────────────────────
+from src.ml.target import (  # noqa: E402
+    n_out_for, radii_from_polyline, uniform_theta,
+)
+
+
+def _circle(n, r=0.45, c=(2.4, 0.05)):
+    ang = uniform_theta(n)
+    return np.stack([c[0] + r * np.cos(ang), c[1] + r * np.sin(ang)], 1), np.asarray(c, float)
+
+
+def _ellipse(n, a=0.5, b=0.3, c=(2.4, 0.0)):
+    ang = uniform_theta(n)
+    return np.stack([c[0] + a * np.cos(ang), c[1] + b * np.sin(ang)], 1), np.asarray(c, float)
+
+
+def test_uniform_theta_excludes_endpoint_and_rejects_small():
+    th = uniform_theta(64)
+    assert th.shape == (64,) and th[0] == 0.0
+    assert np.all(np.diff(th) > 0) and th[-1] < 2 * np.pi
+    assert n_out_for(64) == 66
+    with pytest.raises(ValueError):
+        uniform_theta(3)
+
+
+def test_radii_of_circle_are_constant():
+    bnd, c = _circle(32)
+    r = radii_from_polyline(bnd, c, uniform_theta(64))
+    assert r.shape == (64,)
+    # A 32-gon *is* a circle only to within its chord sagitta r·(1-cos(π/32))≈2.2e-3:
+    # rays through a vertex read exactly 0.45, rays through a chord midpoint read
+    # that much short — the contract is "linear on the hit edge, no smoothing".
+    assert np.allclose(r, 0.45, atol=1.05 * 0.45 * (1 - np.cos(np.pi / 32)))
+
+
+def test_radii_of_ellipse_match_analytic():
+    bnd, c = _ellipse(512)                     # dense polygon: chords ~ arc
+    a, b = 0.5, 0.3
+    th = uniform_theta(64)
+    analytic = a * b / np.sqrt((b * np.cos(th)) ** 2 + (a * np.sin(th)) ** 2)
+    assert np.allclose(radii_from_polyline(bnd, c, th), analytic, atol=1e-3)
+
+
+def test_radii_of_square_hit_edges_and_vertices():
+    s = 0.4                                    # half-side
+    bnd = np.array([[2.4 - s, -s], [2.4 + s, -s], [2.4 + s, s],
+                    [2.4 - s, s]], float)
+    r = radii_from_polyline(bnd, np.array([2.4, 0.0]), uniform_theta(8))
+    # at 45°+k·90° the ray hits a corner: r = s·√2; on axes: r = s
+    expected = np.array([s, np.hypot(s, s)] * 4)
+    assert np.allclose(r, expected, atol=1e-12)
+
+
+def test_non_star_shape_and_nonfinite_give_all_nan_row():
+    # crescent: ray at 180° misses the open part -> whole row NaN
+    bnd = np.array([[2.4, 0.0], [2.6, 0.1], [2.8, 0.0],
+                    [2.6, -0.1]], float)
+    r = radii_from_polyline(bnd, np.array([0.0, 0.0]), uniform_theta(16))
+    assert r.shape == (16,) and np.all(np.isnan(r))
+    r2 = radii_from_polyline(_circle(32)[0], np.array([np.nan, 0.0]),
+                             uniform_theta(16))
+    assert np.all(np.isnan(r2))

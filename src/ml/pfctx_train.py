@@ -187,14 +187,17 @@ class _ShardSampler(Sampler):
 
 def build_context_loaders(target_dir, sidecar_dir, train_shots,
                           validation_shots, context, feature_stats,
-                          target_stats, microbatch, seed, dist_env):
+                          target_stats, microbatch, seed, dist_env,
+                          n_rho=None):
     """The train/validation loaders for one ``(context, seed)`` fit.
 
     Train: ``DistributedSampler(drop_last=False)`` -- the per-rank window
     index is padded deterministically to a multiple of the world size so
     every rank runs the same number of batches. Validation: the exact-once
     ``_ShardSampler``. Both collate with ``pad_context_collate`` at the
-    per-rank microbatch size.
+    per-rank microbatch size.  ``n_rho`` (default None: the stored 34-column
+    target) re-derives the radii block at that many uniform angles at load
+    time.
 
     The train loader carries ``pfctx_meta_fingerprint`` (the target/sidecar
     ``meta.json`` hashes); ``run_epochs`` moves it into its result so the
@@ -204,10 +207,10 @@ def build_context_loaders(target_dir, sidecar_dir, train_shots,
     target_mean, target_std = target_stats
     train_dataset = PFContextDataset(
         target_dir, sidecar_dir, train_shots, context,
-        feature_mean, feature_std, target_mean, target_std)
+        feature_mean, feature_std, target_mean, target_std, n_rho=n_rho)
     validation_dataset = PFContextDataset(
         target_dir, sidecar_dir, validation_shots, context,
-        feature_mean, feature_std, target_mean, target_std)
+        feature_mean, feature_std, target_mean, target_std, n_rho=n_rho)
     microbatch = int(microbatch)
     train_sampler = DistributedSampler(
         train_dataset, num_replicas=dist_env.world_size, rank=dist_env.rank,
