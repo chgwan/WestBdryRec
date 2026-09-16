@@ -358,6 +358,22 @@ def read_baseline_csv(path):
                 for row in csv.DictReader(stream)}
 
 
+def write_per_shot_csv(path, *, art, per_shot):
+    """Persist per-shot mean-symmetric metrics (a subset of the frozen
+    per-shot table's columns) so later paired analyses need no re-scoring."""
+    path = pathlib.Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["context", "seed", "shot", "n_slices",
+                         "mean_symmetric_mm"])
+        for shot in sorted(per_shot):
+            n_rows, mm = per_shot[shot]
+            writer.writerow([art["context_label"], int(art["seed"]),
+                             int(shot), int(n_rows), f"{float(mm):.6f}"])
+    return path
+
+
 def floor_self_check(shots, target_dir, sidecar_dir, floor_csv):
     """Recompute the 32-theta floor per shot and compare to the frozen table.
 
@@ -400,13 +416,17 @@ def floor_self_check(shots, target_dir, sidecar_dir, floor_csv):
 # ── outputs (main() only; tests never write here) ────────────────────
 def write_results_md(path, *, artifact_path, art, shots, n_pred_rows,
                      a64_mm, baseline_mm, floor32, floor32_rows, max_dev,
-                     frozen_floor_median, floor64, floor64_rows, paired):
+                     frozen_floor_median, floor64, floor64_rows, paired,
+                     baseline_path=""):
     """Write the a64 results markdown (tables + the binding claim limits)."""
+    n = int(art["n_rho"])
+    ctx = art["context_label"]
     lines = []
     add = lines.append
-    add("# a64 exploratory evaluation -- dense-angle (64 theta) vs frozen "
-        "32-theta baseline\n")
+    add(f"# exploratory evaluation -- dense-angle ({n} theta), "
+        f"context {ctx}\n")
     add(f"run: `{artifact_path}`\n")
+    add(f"- baseline table: `{baseline_path}`\n")
     add(f"- study `{art['study']}` (exploratory), context "
         f"`{art['context_label']}`, seed {int(art['seed'])}, "
         f"n_rho {int(art['n_rho'])} (n_out {int(art['n_out'])}), "
@@ -432,7 +452,7 @@ def write_results_md(path, *, artifact_path, art, shots, n_pred_rows,
         f"{np.median([floor32[s] for s in shots]):.6f} | "
         f"{np.mean([floor32[s] for s in shots]):.6f} | "
         f"{int(np.median([floor32_rows[s] for s in shots]))} |")
-    add(f"| 64 theta (derived, this run) | "
+    add(f"| {n} theta (derived, this run) | "
         f"{np.median([floor64[s] for s in shots]):.6f} | "
         f"{np.mean([floor64[s] for s in shots]):.6f} | "
         f"{int(np.median([floor64_rows[s] for s in shots]))} |")
@@ -445,8 +465,8 @@ def write_results_md(path, *, artifact_path, art, shots, n_pred_rows,
     add("## Model per-shot error (mean symmetric, mm)\n")
     add("| run | median | mean | min | max |")
     add("|---|---:|---:|---:|---:|")
-    for label, table in (("a64 exploratory (64 theta)", a64_mm),
-                         ("frozen h0512 s0 (32 theta)", baseline_mm)):
+    for label, table in ((f"a{n} {ctx} exploratory", a64_mm),
+                         ("baseline table", baseline_mm)):
         values = np.array([table[s] for s in shots])
         add(f"| {label} | {np.median(values):.4f} | {values.mean():.4f} | "
             f"{values.min():.4f} | {values.max():.4f} |")
@@ -454,14 +474,14 @@ def write_results_md(path, *, artifact_path, art, shots, n_pred_rows,
 
     med, lo, hi = paired
     diffs = np.array([a64_mm[s] - baseline_mm[s] for s in shots])
-    add("## Paired comparison (a64 64 theta minus frozen 32 theta, per shot)"
+    add(f"## Paired comparison (a{n} {ctx} minus baseline, per shot)"
         "\n")
     add(f"- median difference **{med:+.4f} mm**, 95% percentile-bootstrap CI "
         f"[{lo:+.4f}, {hi:+.4f}] ({10_000:,} resamples, seed 20_260_820)")
     add(f"- {len(shots)} paired shots: {int((diffs < 0).sum())} improved, "
         f"{int((diffs > 0).sum())} worsened, "
         f"{int((diffs == 0).sum())} unchanged")
-    add(f"- floor change 32 -> 64 theta: "
+    add(f"- floor change 32 -> {n} theta: "
         f"{np.median([floor64[s] for s in shots]) - frozen_floor_median:+.4f}"
         " mm (median) -- mechanical, never subtracted from the effect\n")
 
@@ -486,7 +506,7 @@ def write_results_md(path, *, artifact_path, art, shots, n_pred_rows,
 
 
 def write_figure(path, *, shots, baseline_mm, a64_mm, floor32_median,
-                 floor64_median):
+                 floor64_median, n_rho: int, run_label: str):
     """Scatter: x = frozen seed-0 32-theta per-shot error, y = a64 64-theta
     per-shot error, with the diagonal and both representation-floor lines."""
     import matplotlib
@@ -514,17 +534,17 @@ def write_figure(path, *, shots, baseline_mm, a64_mm, floor32_median,
                label=f"32-theta floor (median {floor32_median:.3f} mm)")
     ax.axhline(floor64_median, color="#8a887f", linewidth=1.25,
                linestyle=(0, (5, 2, 1, 2)), zorder=1,
-               label=f"64-theta floor (median {floor64_median:.3f} mm)")
+               label=f"{n_rho}-theta floor (median {floor64_median:.3f} mm)")
     ax.scatter(x, y, s=28, color=series, alpha=0.75, linewidths=0.8,
                edgecolors="white", zorder=3,
                label=f"per-shot error ({len(shots)} shots)")
     ax.set_xlim(lo, hi)
     ax.set_ylim(lo, hi)
     ax.set_aspect("equal")
-    ax.set_xlabel("frozen h0512 seed 0, 32 theta (mm)", color=ink)
-    ax.set_ylabel("a64 exploratory h0512 seed 0, 64 theta (mm)", color=ink)
-    ax.set_title("Per-shot mean symmetric error: a64 64-theta "
-                 "vs frozen 32-theta", color=ink)
+    ax.set_xlabel("baseline table (mm)", color=ink)
+    ax.set_ylabel(f"{run_label} (mm)", color=ink)
+    ax.set_title(f"Per-shot mean symmetric error: {run_label} vs baseline",
+                 color=ink)
     for spine in ax.spines.values():
         spine.set_color(grid)
     ax.tick_params(colors=ink_2)
@@ -545,6 +565,9 @@ def main(argv=None):
                     help="path to the a64 exploratory m3.pt artifact")
     ap.add_argument("--out-md", default=DEFAULT_OUT_MD)
     ap.add_argument("--out-png", default=DEFAULT_OUT_PNG)
+    ap.add_argument("--out-csv", default=None,
+                    help="per-shot CSV path; "
+                         "default: <out-md stem>_per_shot.csv")
     ap.add_argument("--split", default=DEFAULT_SPLIT)
     ap.add_argument("--target-dir", default=DEFAULT_TARGET_DIR)
     ap.add_argument("--sidecar-dir", default=DEFAULT_SIDECAR_DIR)
@@ -607,6 +630,13 @@ def main(argv=None):
             "-- the paired comparison cannot be formed")
     diffs = np.array([a64_mm[s] - baseline[s] for s in shots])
     paired = paired_bootstrap(diffs)
+    csv_path = (rooted(args.out_csv) if args.out_csv else
+                rooted(args.out_md).with_name(
+                    rooted(args.out_md).stem + "_per_shot.csv"))
+    write_per_shot_csv(csv_path, art=art,
+                       per_shot={shot: (len(predictions[shot].row_index),
+                                        a64_mm[shot]) for shot in shots})
+    print(f"[a64] wrote {csv_path}")
     print(f"[a64] paired median {paired[0]:+.4f} mm "
           f"(95% CI [{paired[1]:+.4f}, {paired[2]:+.4f}])")
 
@@ -617,12 +647,20 @@ def main(argv=None):
         a64_mm=a64_mm, baseline_mm=baseline, floor32=floor32,
         floor32_rows=floor32_rows, max_dev=max_dev,
         frozen_floor_median=frozen_floor_median, floor64=floor64,
-        floor64_rows=floor64_rows, paired=paired)
+        floor64_rows=floor64_rows, paired=paired,
+        baseline_path=args.baseline)
     png_path = write_figure(
         rooted(args.out_png), shots=shots, baseline_mm=baseline,
         a64_mm=a64_mm,
         floor32_median=float(np.median([floor32[s] for s in shots])),
-        floor64_median=float(np.median([floor64[s] for s in shots])))
+        floor64_median=float(np.median([floor64[s] for s in shots])),
+        n_rho=n_rho,
+        run_label=f"a{n_rho} {art['context_label']} s{art['seed']} "
+                  f"exploratory, {n_rho} theta")
     print(f"[a64] wrote {md_path}")
     print(f"[a64] wrote {png_path}")
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

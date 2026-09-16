@@ -21,7 +21,8 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from src.ml.a64_eval import (  # noqa: E402
-    paired_bootstrap, predict_shot, reconstruct_and_floor,
+    paired_bootstrap, predict_shot, read_baseline_csv, reconstruct_and_floor,
+    write_per_shot_csv,
 )
 from src.ml.target import uniform_theta  # noqa: E402
 
@@ -207,3 +208,14 @@ def test_load_artifact_rejects_a_non_exploratory_artifact(tmp_path):
         assert "exploratory" in str(exc)
     else:
         raise AssertionError("a non-exploratory artifact must be refused")
+
+
+def test_write_per_shot_csv_round_trips_through_read_baseline(tmp_path):
+    art = {"context_label": "h0128", "seed": 0}
+    per_shot = {58293: (120, 5.5), 58295: (300, 6.25)}
+    path = write_per_shot_csv(tmp_path / "a360_h0128_s0_per_shot.csv",
+                              art=art, per_shot=per_shot)
+    lines = path.read_text().splitlines()
+    assert lines[0] == "context,seed,shot,n_slices,mean_symmetric_mm"
+    assert lines[1] == "h0128,0,58293,120,5.500000"
+    assert read_baseline_csv(path) == {58293: 5.5, 58295: 6.25}
