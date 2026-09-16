@@ -219,3 +219,97 @@ def test_write_per_shot_csv_round_trips_through_read_baseline(tmp_path):
     assert lines[0] == "context,seed,shot,n_slices,mean_symmetric_mm"
     assert lines[1] == "h0128,0,58293,120,5.500000"
     assert read_baseline_csv(path) == {58293: 5.5, 58295: 6.25}
+
+
+def test_main_routes_baseline_and_default_out_csv(tmp_path):
+    """main() end to end on the smoke fixture: a pre-written exploratory
+    baseline (the run's own per-shot value plus a constant offset, so the
+    expected paired median, run minus baseline, is analytically the negated
+    offset) must reach the md's paired section and provenance line, and the
+    omitted ``--out-csv`` must default to ``<out-md stem>_per_shot.csv``."""
+    import json
+    import re
+
+    helpers = _pfctx_helpers()
+    from src.ml.a64_eval import (
+        build_model, floor_per_shot, load_artifact, main, read_baseline_csv)
+    from src.ml.models import ActSeqAttn
+    from src.ml.pf_context import context_level
+    from src.ml.pfctx_data import PFContextDataset
+
+    target_dir, sidecar_dir = helpers.write_pfctx_fixture(tmp_path, nt=300)
+    shot = helpers.PFCTX_SHOT
+    torch.manual_seed(0)
+    model = ActSeqAttn(n_act=21, n_out=66, d=32, heads=4, depth=2,
+                       ffn=64, dropout=0.1, pe="rope_time")
+    artifact = {
+        "study": "a64_exploratory", "exploratory": True,
+        "n_act": 21, "n_out": 66, "n_rho": 64, "depth": 2,
+        "hp": {"d_model": 32, "heads": 4, "ffn": 64, "dropout": 0.1,
+               "epochs": 1},
+        "context_label": "h0032", "seed": 0,
+        "state": model.state_dict(),
+        "feature_mean": np.zeros(21, np.float32),
+        "feature_std": np.ones(21, np.float32),
+        "target_mean": np.zeros(66, np.float32),
+        "target_std": np.ones(66, np.float32),
+        "best_val_mse": float("nan"),
+    }
+    artifact_path = tmp_path / "m3.pt"
+    torch.save(artifact, artifact_path)
+
+    # The run's own per-shot value from exactly the pipeline main() drives
+    # (same eval-mode weights, default score_block): main() recomputes it
+    # identically, so the paired median below is analytically -offset.
+    art = load_artifact(artifact_path)
+    dataset = PFContextDataset(
+        target_dir, sidecar_dir, [shot], context_level("h0032"),
+        artifact["feature_mean"], artifact["feature_std"],
+        artifact["target_mean"], artifact["target_std"], n_rho=64)
+    record = predict_shot(art, dataset, build_model(art), uniform_theta(64),
+                          target_dir)[shot]
+    own_mm = float(record.per_slice_mm.mean())
+
+    offset = 1.25
+    baseline_path = write_per_shot_csv(
+        tmp_path / "baseline_per_shot.csv",
+        art={"context_label": "h0032", "seed": 0},
+        per_shot={shot: (len(record.row_index), own_mm + offset)})
+
+    # the fixture's own 32-theta floor, so main()'s strict self-check
+    # against --floor-csv agrees by construction
+    floor_value, floor_rows = floor_per_shot(
+        pathlib.Path(target_dir) / f"{shot}.npz", sidecar_dir, 32)
+    floor_csv = tmp_path / "floor.csv"
+    floor_csv.write_text("shot,mean_symmetric_mm,n_slices\n"
+                         f"{shot},{floor_value:.12f},{floor_rows}\n")
+
+    split_path = tmp_path / "split.json"
+    split_path.write_text(json.dumps({"train": [], "validation": [],
+                                      "test": [shot]}))
+    out_dir = tmp_path / "out"
+    rc = main(["--artifact", str(artifact_path),
+               "--out-md", str(out_dir / "results.md"),
+               "--out-png", str(out_dir / "fig.png"),
+               "--split", str(split_path),
+               "--target-dir", str(target_dir),
+               "--sidecar-dir", str(sidecar_dir),
+               "--baseline", str(baseline_path),
+               "--floor-csv", str(floor_csv)])
+    assert rc == 0
+
+    # --out-csv omitted: the CSV must default to <out-md stem>_per_shot.csv
+    derived = (out_dir / "results.md").with_name("results_per_shot.csv")
+    assert derived.exists()
+    lines = derived.read_text().splitlines()
+    assert lines[0] == "context,seed,shot,n_slices,mean_symmetric_mm"
+    assert abs(read_baseline_csv(derived)[shot] - own_mm) < 1e-6
+    assert (out_dir / "fig.png").exists()
+
+    md = (out_dir / "results.md").read_text()
+    assert "minus baseline, per shot" in md      # the paired section header
+    assert f"`{baseline_path}`" in md            # the provenance line
+    median = float(re.search(r"median difference \*\*([+-]?\d+\.\d+) mm",
+                             md).group(1))
+    # baseline = own + offset, and the paired diff is run - baseline
+    assert abs(median + offset) < 5e-5           # .4f rendering tolerance
