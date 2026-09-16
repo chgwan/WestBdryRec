@@ -114,3 +114,19 @@ def test_driver_refuses_a_config_without_exploratory(tmp_path):
     with pytest.raises(SystemExit, match="exploratory"):
         drv.main(["--config", str(cfg), "--split", "unused.json",
                   "--out-root", str(tmp_path / "trains")])
+
+
+def test_a360_ctx_config_pins_the_context_sweep():
+    cfg = yaml.safe_load(open("configs/dcs_pf_context_a360_ctx.yml"))
+    assert cfg["exploratory"] is True
+    assert cfg["n_rho"] == 360
+    assert [c["label"] for c in cfg["contexts"]] == [
+        "h0128", "h0256", "h1024", "h2048"]
+    assert all((c["nominal_samples"], c["seconds"]) == expect for c, expect
+               in zip(cfg["contexts"],
+                      [(128, 0.260096), (256, 0.522240),
+                       (1024, 2.095104), (2048, 4.192256)]))
+    assert cfg["seeds"] == [0]
+    anchor = yaml.safe_load(open("configs/dcs_pf_context_a360.yml"))
+    assert cfg["hp"] == anchor["hp"]          # identical hyperparameters
+    assert cfg["input_width"] == anchor["input_width"] == 21
