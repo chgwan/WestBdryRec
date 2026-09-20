@@ -130,3 +130,23 @@ def test_a360_ctx_config_pins_the_context_sweep():
     anchor = yaml.safe_load(open("configs/dcs_pf_context_a360.yml"))
     assert cfg["hp"] == anchor["hp"]          # identical hyperparameters
     assert cfg["input_width"] == anchor["input_width"] == 21
+
+
+HP_CAPACITY_GRID = {
+    "d192f768": (192, 768), "d192f1024": (192, 1024),
+    "d256f2048": (256, 2048), "d384f1024": (384, 1024),
+    "d384f2048": (384, 2048),
+}
+
+
+def test_hp_search_configs_pin_capacity_grid():
+    anchor = yaml.safe_load(open("configs/dcs_pf_context_a360.yml"))
+    for tag, (d_model, ffn) in HP_CAPACITY_GRID.items():
+        with open(f"configs/dcs_hp_a360_{tag}.yml") as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["exploratory"] is True and cfg["n_rho"] == 360
+        assert [c["label"] for c in cfg["contexts"]] == ["h0512"]
+        assert cfg["seeds"] == [0]
+        assert (cfg["hp"]["d_model"], cfg["hp"]["ffn"]) == (d_model, ffn)
+        assert cfg["hp"] == dict(anchor["hp"], d_model=d_model, ffn=ffn)
+        assert cfg["input_width"] == anchor["input_width"]
